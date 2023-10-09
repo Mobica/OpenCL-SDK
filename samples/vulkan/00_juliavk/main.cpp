@@ -550,10 +550,10 @@ private:
                     cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), TEX_ARRAY_LAYERS,
                     gwx, gwy));
 #elif TEX_3D_LAYERS > 1
-                mems[i].reset(new cl::Image3D(
-                    context, vprops, CL_MEM_WRITE_ONLY,
-                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwx, gwy,
-                    TEX_3D_LAYERS, 1, 0, gwx * 8 * 4, gwx * 8 * 4 * gwy));
+                mems[i].reset(
+                    new cl::Image3D(context, vprops, CL_MEM_WRITE_ONLY,
+                                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8),
+                                    gwx, gwy, TEX_3D_LAYERS));
 #elif TEX_1D_ARRAY_PATH
                 mems[i].reset(new cl::Image1DArray(
                     context, vprops, CL_MEM_WRITE_ONLY,
@@ -1397,7 +1397,11 @@ private:
                                       VK_FORMAT_R8G8B8A8_UNORM,
                                       VK_IMAGE_LAYOUT_UNDEFINED,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-#if TEX_1D_ARRAY_PATH > 0
+
+#if TEX_ARRAY_LAYERS > 1
+                                      ,
+                                      TEX_ARRAY_LAYERS
+#elif TEX_1D_ARRAY_PATH > 0
                                       ,
                                       texHeight
 #endif
@@ -1458,16 +1462,19 @@ private:
                                 VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D,
                                 uint32_t layers = 1)
     {
-        VkImageViewCreateInfo viewInfo{};
-        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        VkImageViewCreateInfo viewInfo{
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+        };
+        viewInfo.pNext = nullptr;
         viewInfo.image = image;
         viewInfo.viewType = type;
         viewInfo.format = format;
         viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.levelCount = 1; // VK_REMAINING_MIP_LEVELS;
         viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = layers; // texture array path
+        viewInfo.subresourceRange.layerCount =
+            layers; // VK_REMAINING_ARRAY_LAYERS;
 
         VkImageView imageView;
         if (vkCreateImageView(device, &viewInfo, nullptr, &imageView)
@@ -1626,7 +1633,7 @@ private:
         //        layerCount members of imageSubresource must be 0 and 1,
         //        respectively
         barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount = TEX_ARRAY_LAYERS * layers;
+        barrier.subresourceRange.layerCount = layers;
 
         VkPipelineStageFlags sourceStage;
         VkPipelineStageFlags destinationStage;
