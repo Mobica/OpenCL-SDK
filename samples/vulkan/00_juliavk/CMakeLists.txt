@@ -24,6 +24,6 @@ add_sample(
     VERSION 300 # clCreateImageWithProperties
     CATEGORY vulkan
     SOURCES main.cpp
-    KERNELS juliavk.vert.spv juliavk.frag.spv juliavk_array.frag.spv juliavk_3d.frag.spv juliavk_1d_array.frag.spv
+    KERNELS juliavk.vert.spv juliavk.frag.spv juliavk_array.frag.spv juliavk_3d.frag.spv juliavk_1d_array.frag.spv juliavk_1d.frag.spv
     INCLUDES ${Vulkan_INCLUDE_DIR}
     LIBS ${Vulkan_LIBRARY} glfw)

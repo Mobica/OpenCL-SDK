@@ -58,16 +58,22 @@ all
 
 
 // set to 0/1
+#define TEX_1D_PATH 0
+// set to 0/1
 #define TEX_1D_ARRAY_PATH 1
 // set to 1-[num array layers]
 #define TEX_ARRAY_LAYERS 1
 // set to 1-[3d texture depth]
 #define TEX_3D_LAYERS 1
 #define TEX_LAYERS (TEX_ARRAY_LAYERS * TEX_3D_LAYERS)
+#define LAYERS_UNIFORM                                                         \
+    ((TEX_ARRAY_LAYERS * TEX_3D_LAYERS > 1) || TEX_1D_PATH > 0                 \
+     || TEX_1D_ARRAY_PATH > 0)
 
 std::int32_t current_array_layer = 0;
 
 static const char kernelString[] =
+
 #if TEX_LAYERS > 1
 #if TEX_ARRAY_LAYERS > 1
     R"CLC(kernel void Julia( write_only image2d_array_t dst, float cr, float ci, int layer ))CLC"
@@ -77,6 +83,8 @@ static const char kernelString[] =
 #else
 #if TEX_1D_ARRAY_PATH == 1
     R"CLC(kernel void Julia( write_only image1d_array_t dst, float cr, float ci ))CLC"
+#elif TEX_1D_PATH
+    R"CLC(kernel void Julia( write_only image1d_t dst, float cr, float ci ))CLC"
 #else
     R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci ))CLC"
 #endif
@@ -123,6 +131,12 @@ static const char kernelString[] =
 #if TEX_LAYERS > 1
     R"CLC(
     write_imagef(dst, (int4)(x, y, layer, 0), color);
+}
+)CLC";
+#elif TEX_1D_PATH
+    R"CLC(
+    int coord = x + y * cWidth;
+    write_imagef(dst, coord, color);
 }
 )CLC";
 #else
@@ -197,10 +211,11 @@ struct SwapChainSupportDetails
     std::vector<VkPresentModeKHR> presentModes;
 };
 
-#if (TEX_LAYERS > 1)
+#if LAYERS_UNIFORM
 struct UniformBufferObject
 {
     alignas(4) std::int32_t layer = 0;
+    alignas(4) std::int32_t count = 0;
 };
 #endif
 
@@ -224,8 +239,13 @@ private:
     bool animate = false;
     bool redraw = false;
 
+#if TEX_1D_PATH
+    size_t gwx = 128;
+    size_t gwy = 128;
+#else
     size_t gwx = 512;
     size_t gwy = 512;
+#endif
     size_t lwx = 0;
     size_t lwy = 0;
 
@@ -293,7 +313,7 @@ private:
     PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR = NULL;
 #endif
 
-#if (TEX_LAYERS > 1)
+#if LAYERS_UNIFORM
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
 #endif
@@ -310,7 +330,7 @@ private:
     cl::CommandQueue commandQueue;
     cl::Kernel kernel;
 
-#if 0
+#if 1
     size_t ocl_max_img2d_width,
            ocl_max_img1d_width,
            ocl_max_array_size;
@@ -464,7 +484,7 @@ private:
             }
         }
 
-#if 0
+#if 1
         int error = CL_SUCCESS;
         error |= clGetDeviceInfo( devices[deviceIndex](), CL_DEVICE_IMAGE2D_MAX_WIDTH, sizeof( ocl_max_img2d_width ), &ocl_max_img2d_width, NULL );
         error |= clGetDeviceInfo( devices[deviceIndex](), CL_DEVICE_IMAGE_MAX_BUFFER_SIZE, sizeof( ocl_max_img1d_width ), &ocl_max_img1d_width, NULL );
@@ -474,6 +494,7 @@ private:
 
         if (error!=CL_SUCCESS)
             printf("clGetDeviceInfo error: %d\n", error);
+
 #endif
 
         context = cl::Context{ devices[deviceIndex] };
@@ -558,6 +579,10 @@ private:
                 mems[i].reset(new cl::Image1DArray(
                     context, vprops, CL_MEM_WRITE_ONLY,
                     cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwy, gwx));
+#elif TEX_1D_PATH
+                mems[i].reset(new cl::Image1D(
+                    context, vprops, CL_MEM_WRITE_ONLY,
+                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwy * gwx));
 #else
                 mems[i].reset(new cl::Image2D(
                     context, vprops, CL_MEM_WRITE_ONLY,
@@ -597,7 +622,7 @@ private:
         createSwapChain();
         createImageViews();
         createRenderPass();
-#if (TEX_LAYERS > 1)
+#if LAYERS_UNIFORM
         createUniformBuffer();
 #endif
         createDescriptorSetLayout();
@@ -712,7 +737,7 @@ private:
             }
             vkDestroyFence(device, inFlightFences[i], nullptr);
 
-#if (TEX_LAYERS > 1)
+#if LAYERS_UNIFORM
             vkDestroyBuffer(device, uniformBuffers[i], nullptr);
             vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
         }
@@ -1116,7 +1141,7 @@ private:
         }
     }
 
-#if (TEX_LAYERS > 1)
+#if LAYERS_UNIFORM
     void createUniformBuffer()
     {
         VkDeviceSize bufferSize = sizeof(UniformBufferObject);
@@ -1145,7 +1170,7 @@ private:
         samplerLayoutBinding.pImmutableSamplers = nullptr;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-#if (TEX_LAYERS > 1)
+#if LAYERS_UNIFORM
         VkDescriptorSetLayoutBinding uniformLayoutBinding{};
         uniformLayoutBinding.binding = 1;
         uniformLayoutBinding.descriptorCount = 1;
@@ -1183,9 +1208,11 @@ private:
 #elif TEX_3D_LAYERS > 1
         auto fragShaderCode = readFile("juliavk_3d.frag.spv");
 #elif TEX_1D_ARRAY_PATH > 0
-            auto fragShaderCode = readFile("juliavk_1d_array.frag.spv");
+        auto fragShaderCode = readFile("juliavk_1d_array.frag.spv");
+#elif TEX_1D_PATH > 0
+        auto fragShaderCode = readFile("juliavk_1d.frag.spv");
 #else
-            auto fragShaderCode = readFile("juliavk.frag.spv");
+        auto fragShaderCode = readFile("juliavk.frag.spv");
 #endif
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
@@ -1386,7 +1413,7 @@ private:
 #if TEX_3D_LAYERS > 1
                 ,
                 VK_IMAGE_TYPE_3D
-#elif TEX_1D_ARRAY_PATH > 0
+#elif TEX_1D_ARRAY_PATH || TEX_1D_PATH
                 ,
                 VK_IMAGE_TYPE_1D
 #endif
@@ -1416,22 +1443,23 @@ private:
 
         for (size_t i = 0; i < swapChainImages.size(); i++)
         {
-
-#if TEX_ARRAY_LAYERS > 1
             textureImageViews[i] =
-                createImageView(textureImages[i], VK_FORMAT_R8G8B8A8_UNORM,
+                createImageView(textureImages[i], VK_FORMAT_R8G8B8A8_UNORM
+#if TEX_ARRAY_LAYERS > 1
+                                ,
                                 VK_IMAGE_VIEW_TYPE_2D_ARRAY, TEX_ARRAY_LAYERS);
 #elif TEX_3D_LAYERS > 1
-            textureImageViews[i] =
-                createImageView(textureImages[i], VK_FORMAT_R8G8B8A8_UNORM,
+                                ,
                                 VK_IMAGE_VIEW_TYPE_3D);
-#elif TEX_1D_ARRAY_PATH > 0
-                textureImageViews[i] = createImageView(
-                    textureImages[i], VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_IMAGE_VIEW_TYPE_1D_ARRAY, static_cast<uint32_t>(gwy));
+#elif TEX_1D_ARRAY_PATH
+                                ,
+                                VK_IMAGE_VIEW_TYPE_1D_ARRAY,
+                                static_cast<uint32_t>(gwy));
+#elif TEX_1D_PATH
+                                ,
+                                VK_IMAGE_VIEW_TYPE_1D);
 #else
-                textureImageViews[i] =
-                    createImageView(textureImages[i], VK_FORMAT_R8G8B8A8_UNORM);
+                );
 #endif
         }
     }
@@ -1440,8 +1468,8 @@ private:
     {
         VkSamplerCreateInfo samplerInfo{};
         samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        samplerInfo.magFilter = VK_FILTER_LINEAR;
-        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.magFilter = VK_FILTER_NEAREST;
+        samplerInfo.minFilter = VK_FILTER_NEAREST;
         samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
         samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
@@ -1449,7 +1477,7 @@ private:
         samplerInfo.unnormalizedCoordinates = VK_FALSE;
         samplerInfo.compareEnable = VK_FALSE;
         samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 
         if (vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler)
             != VK_SUCCESS)
@@ -1517,6 +1545,9 @@ private:
 
 #if TEX_1D_ARRAY_PATH > 0
         layers = height;
+        height = 1;
+#elif TEX_1D_PATH
+        width = width * height;
         height = 1;
 #endif
 
@@ -1698,7 +1729,7 @@ private:
         endSingleTimeCommands(commandBuffer);
     }
 
-#if TEX_LAYERS > 1
+#if LAYERS_UNIFORM
     void transitionUniformLayout(VkBuffer buffer, VkAccessFlagBits src,
                                  VkAccessFlagBits dst)
     {
@@ -1739,7 +1770,7 @@ private:
     void createDescriptorPool()
     {
 
-#if (TEX_LAYERS > 1)
+#if LAYERS_UNIFORM
         std::array<VkDescriptorPoolSize, 2> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         poolSizes[0].descriptorCount =
@@ -1793,7 +1824,7 @@ private:
             imageInfo.imageView = textureImageViews[i];
             imageInfo.sampler = textureSampler;
 
-#if TEX_LAYERS > 1
+#if LAYERS_UNIFORM
             VkDescriptorBufferInfo bufferInfo{};
             bufferInfo.buffer = uniformBuffers[i];
             bufferInfo.offset = 0;
@@ -1992,7 +2023,7 @@ private:
             VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
 #elif defined(__linux__)
         exportSemaphoreCreateInfo.handleTypes =
-            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+            VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT; // VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
 #endif
 
         VkSemaphoreCreateInfo semaphoreInfo{};
@@ -2040,6 +2071,9 @@ private:
 
     void updateTexture(uint32_t currentImage)
     {
+#if LAYERS_UNIFORM
+        UniformBufferObject ubo = {};
+
 #if (TEX_LAYERS > 1)
         static auto start{ std::chrono::steady_clock::now() };
         static int prev_frame = current_array_layer;
@@ -2047,13 +2081,21 @@ private:
         auto end = std::chrono::steady_clock::now();
         const std::chrono::duration<double> secs{ end - start };
 
+        current_array_layer = int(secs.count()) % TEX_LAYERS;
+#else
+        current_array_layer = gwy;
+#endif
+
+        ubo.layer = current_array_layer;
+        ubo.count = TEX_LAYERS;
+
         transitionUniformLayout(uniformBuffers[currentImage],
                                 VK_ACCESS_SHADER_READ_BIT,
                                 VK_ACCESS_TRANSFER_WRITE_BIT);
 
         VkCommandBuffer commandBuffer = beginSingleTimeCommands();
         vkCmdUpdateBuffer(commandBuffer, uniformBuffers[currentImage], 0,
-                          sizeof(UniformBufferObject), &current_array_layer);
+                          sizeof(UniformBufferObject), &ubo);
         endSingleTimeCommands(commandBuffer);
 
         transitionUniformLayout(uniformBuffers[currentImage],
@@ -2253,7 +2295,7 @@ private:
                     default:
                         printf(
                             "Unknown cl_external_memory_handle_type_khr %04X\n",
-                            type);
+                            (unsigned int)type);
                 }
 #undef CASE_TO_STRING
             }
