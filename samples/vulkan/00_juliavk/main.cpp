@@ -2532,13 +2532,8 @@ private:
 
     bool checkDeviceExtensionSupport(VkPhysicalDevice device)
     {
-
         VkPhysicalDeviceProperties pProperties;
         vkGetPhysicalDeviceProperties(device, &pProperties);
-
-        if (std::string(pProperties.deviceName).find("Intel")
-            != std::string::npos)
-            return false;
 
         uint32_t extensionCount;
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount,
