@@ -57,6 +57,12 @@ all
 #include <math.h>
 
 
+// GLM includes
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
+
 // set to 1-[num array layers]
 #define TEX_ARRAY_LAYERS 1
 // set to 1-[3d texture depth]
@@ -201,6 +207,13 @@ struct UniformBufferObject
 };
 #endif
 
+
+
+struct Vertex {
+    glm::vec2 pos;
+    glm::vec3 color;
+};
+
 class JuliaVKApplication {
 public:
     void run(int argc, char** argv)
@@ -299,6 +312,13 @@ private:
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
 #endif
+
+
+
+    std::vector<VkBuffer> vertexBuffers;
+    std::vector<VkDeviceMemory> vertexBufferMemories;
+
+
 
     int platformIndex = 0;
     int deviceIndex = 0;
@@ -611,6 +631,8 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
+
+
         createTextureImages();
         createTextureImageViews();
         createTextureSampler();
@@ -707,6 +729,17 @@ private:
         vkDestroySampler(device, textureSampler, nullptr);
 
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
+
+
+
+        for (auto buffer : vertexBuffers) {
+            vkDestroyBuffer(device, buffer, nullptr);
+        }
+        for (auto bufferMemory : vertexBufferMemories) {
+            vkFreeMemory(device, bufferMemory, nullptr);
+        }
+
+
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
@@ -1366,6 +1399,28 @@ private:
         }
     }
 
+
+    void createVertexBuffers() {
+        VkMemoryPropertyFlags properties =
+            deviceLocalBuffers && useExternalMemory ?
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT :
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+        vertexBuffers.resize(swapChainImages.size());
+        vertexBufferMemories.resize(swapChainImages.size());
+
+        for (size_t i = 0; i < swapChainImages.size(); i++) {
+            createShareableBuffer(
+                sizeof(cl_float4) * numBodies,
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                properties,
+                vertexBuffers[i],
+                vertexBufferMemories[i]);
+        }
+    }
+
+
+
     void createTextureImages()
     {
         VkImageTiling tiling =
@@ -1973,6 +2028,9 @@ private:
             vkCmdBindPipeline(commandBuffers[i],
                               VK_PIPELINE_BIND_POINT_GRAPHICS,
                               graphicsPipeline);
+
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(commandBuffers[i], 0, 1, &vertexBuffers[i], offsets);
 
             vkCmdBindDescriptorSets(
                 commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS,

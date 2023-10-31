@@ -26,4 +26,4 @@ add_sample(
     SOURCES main.cpp
     KERNELS ocean.vert.spv ocean.frag.spv ocean_2D_array.frag.spv ocean_3d.frag.spv
     INCLUDES ${Vulkan_INCLUDE_DIR}
-    LIBS ${Vulkan_LIBRARY} glfw)
+    LIBS ${Vulkan_LIBRARY} glfw glm::glm)
