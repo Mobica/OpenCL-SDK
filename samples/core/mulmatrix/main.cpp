@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <fstream>
 
 
 std::string kernelMulMatrix =
@@ -33,9 +34,9 @@ std::string kernelMulMatrix =
 
 class MatrixMultiplication {
 public:
-    MatrixMultiplication(cl::Platform& platform, std::string& kernelSource);
-    MatrixMultiplication(std::vector<cl::Platform>& platforms,
-                         std::string& kernelSource);
+    MatrixMultiplication(cl::Platform& platform);//, std::string& kernelSource);
+    MatrixMultiplication(std::vector<cl::Platform>& platforms);//,
+                         //std::string& kernelSource);
     ~MatrixMultiplication() = default;
 
     void Multiply();
@@ -46,6 +47,8 @@ private:
     void CreatePrograms();
     void MergeData();
     void CheckResults();
+
+    bool LoadKernel();
 
     std::string mKernelSource;
     const int mMatrixDimension = 4 * 1024;
@@ -60,20 +63,28 @@ private:
     std::vector<cl::Platform> mPlatforms;
 };
 
-MatrixMultiplication::MatrixMultiplication(cl::Platform& platform,
-                                           std::string& kernelSource)
-    : mKernelSource(kernelSource)
+MatrixMultiplication::MatrixMultiplication(cl::Platform& platform)//,
+                                           //std::string& kernelSource)
+//    : mKernelSource(kernelSource)
 {
+    if (!LoadKernel())
+    {
+        exit(-1);
+    }
     mPlatforms.push_back(platform);
     CreateContextsAndCommandQueues();
     CreatePrograms();
     PrepareMatrices();
 };
 
-MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
-                                           std::string& kernelSource)
-    : mPlatforms(platforms), mKernelSource(kernelSource)
+MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms)//,
+                                           //std::string& kernelSource)
+    : mPlatforms(platforms)//, mKernelSource(kernelSource)
 {
+    if (!LoadKernel())
+    {
+        exit(-1);
+    }
     CreateContextsAndCommandQueues();
     CreatePrograms();
     PrepareMatrices();
@@ -122,7 +133,7 @@ void MatrixMultiplication::Multiply()
     {
         auto half = (mMatrixDimension * mMatrixDimension) / mContexts.size();
         auto start = half * gpu;
-        auto stop = half + start;
+        auto stop = start + half;
 
         threads++;
         std::thread work([&, gpu]() {
@@ -191,6 +202,22 @@ void MatrixMultiplication::MergeData()
     }
 };
 
+bool MatrixMultiplication::LoadKernel()
+{
+    std::string fileName("mulMatrix.cl");
+    std::ifstream stream(fileName.c_str());
+    if (!stream.is_open())
+    {
+        std::cout << "Cannot open file: " << fileName << std::endl;
+        return false;
+    }
+    mKernelSource =
+        std::move(std::string(std::istreambuf_iterator<char>(stream),
+                              (std::istreambuf_iterator<char>())));
+
+    return true;
+}
+
 void MatrixMultiplication::PrepareMatrices()
 {
     auto size = mMatrixDimension * mMatrixDimension;
@@ -232,11 +259,11 @@ int main()
         std::vector<cl::Platform> platforms;
         cl::Platform::get(&platforms);
 
-        MatrixMultiplication nVidiaPlatformMul(platforms[0], kernelMulMatrix);
+        MatrixMultiplication nVidiaPlatformMul(platforms[0]);
         nVidiaPlatformMul.Multiply();
-        MatrixMultiplication intelPlatformMul(platforms[1], kernelMulMatrix);
+        MatrixMultiplication intelPlatformMul(platforms[1]);
         intelPlatformMul.Multiply();
-        MatrixMultiplication twoPlatformMul(platforms, kernelMulMatrix);
+        MatrixMultiplication twoPlatformMul(platforms);
         twoPlatformMul.Multiply();
 
         char exit;

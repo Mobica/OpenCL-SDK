@@ -16,4 +16,5 @@ add_sample(
     TEST
     TARGET mulmatrix
     VERSION 120
-    SOURCES main.cpp)
+    SOURCES main.cpp
+    KERNELS mulMatrix.cl)
