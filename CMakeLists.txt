@@ -22,6 +22,9 @@ project(OpenCL-SDK
     C CXX
 )
 
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/external/OpenCL-CLHPP/include)
+
 include(CMakeDependentOption)
 option(OPENCL_SDK_BUILD_SAMPLES "Build sample code" ON)
 cmake_dependent_option(OPENCL_SDK_BUILD_OPENGL_SAMPLES "Build OpenCL-OpenGL interop sample code" ON OPENCL_SDK_BUILD_SAMPLES OFF)

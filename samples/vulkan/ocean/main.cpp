@@ -44,6 +44,7 @@ all
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#include <glm/glm.hpp>
 
 #include "util.hpp"
 
@@ -62,28 +63,18 @@ all
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+// ocean mesh patch size
+#define NX 1024
+#define NY 1024
 
-// set to 1-[num array layers]
-#define TEX_ARRAY_LAYERS 1
-// set to 1-[3d texture depth]
-#define TEX_3D_LAYERS 1
-#define TEX_LAYERS (TEX_ARRAY_LAYERS * TEX_3D_LAYERS)
-#define LAYERS_UNIFORM  (TEX_ARRAY_LAYERS * TEX_3D_LAYERS > 1)
+#define WX 1.f
+#define WY 1.f
 
 std::int32_t current_array_layer = 0;
 
 static const char kernelString[] =
 
-#if TEX_LAYERS > 1
-#if TEX_ARRAY_LAYERS > 1
-    R"CLC(kernel void Julia( write_only image2d_array_t dst, float cr, float ci, int layer ))CLC"
-#elif TEX_3D_LAYERS > 1
-    R"CLC(kernel void Julia( write_only image3d_t dst, float cr, float ci, int layer ))CLC"
-#endif
-#else
-    R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci ))CLC"
-#endif
-    R"CLC(
+R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci ))
 {
     const float cMinX = -1.5f;
     const float cMaxX =  1.5f;
@@ -121,18 +112,10 @@ static const char kernelString[] =
     result = min( result, 1.0f );
 
     // RGBA
-    float4 color = (float4)(result + 0.6f, result, result * result, 1.0f);)CLC"
-#if TEX_LAYERS > 1
-    R"CLC(
-    write_imagef(dst, (int4)(x, y, layer, 0), color);
-}
-)CLC";
-#else
-    R"CLC(
+    float4 color = (float4)(result + 0.6f, result, result * result, 1.0f);)
     write_imagef(dst, (int2)(x, y), color);
 }
 )CLC";
-#endif
 
 
 const int MAX_FRAMES_IN_FLIGHT = 2;
@@ -199,19 +182,46 @@ struct SwapChainSupportDetails
     std::vector<VkPresentModeKHR> presentModes;
 };
 
-#if LAYERS_UNIFORM
 struct UniformBufferObject
 {
-    alignas(4) std::int32_t layer = 0;
-    alignas(4) std::int32_t count = 0;
+    alignas(4) glm::mat4    view_proj;
+    alignas(4) glm::vec3    sun_dir;
+    alignas(4) glm::vec3    cam_pos;
+    alignas(4) std::int32_t ocean_size = 0;
+    alignas(4) std::int32_t tex_size = 0;
 };
-#endif
-
 
 
 struct Vertex {
-    glm::vec2 pos;
-    glm::vec3 color;
+
+    glm::vec3 pos;
+    glm::vec2 tc;
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+            VkVertexInputBindingDescription bindingDescription{};
+
+            bindingDescription.binding = 0;
+            bindingDescription.stride = sizeof(Vertex);
+            bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+            return bindingDescription;
+        }
+
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 2> attributeDescriptions{};
+
+        attributeDescriptions[0].binding = 0;
+        attributeDescriptions[0].location = 0;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[0].offset = offsetof(Vertex, pos);
+
+        attributeDescriptions[1].binding = 0;
+        attributeDescriptions[1].location = 1;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[1].offset = offsetof(Vertex, tc);
+
+        return attributeDescriptions;
+    }
 };
 
 class JuliaVKApplication {
@@ -234,13 +244,9 @@ private:
     bool animate = false;
     bool redraw = false;
 
-#if TEX_1D_PATH
-    size_t gwx = 128;
-    size_t gwy = 128;
-#else
     size_t gwx = 512;
     size_t gwy = 512;
-#endif
+
     size_t lwx = 0;
     size_t lwy = 0;
 
@@ -282,9 +288,20 @@ private:
 
     bool linearImages = false;
     bool deviceLocalImages = true;
-    std::vector<VkImage> textureImages;
-    std::vector<VkDeviceMemory> textureImageMemories;
-    std::vector<VkImageView> textureImageViews;
+
+
+    // only last stage image must be shared between OCL and vulkan
+    // this texture will hold displacements. Quite possible I will need
+    // one more texture for normal map!
+    std::vector<VkImage> images;
+    std::vector<VkDeviceMemory> imageMemories;
+    std::vector<VkImageView> imageViews;
+
+
+    // Ocean grid vertices and related buffers
+    std::vector<Vertex> verts;
+    std::vector<VkBuffer> vertexBuffers;
+    std::vector<VkDeviceMemory> vertexBufferMemories;
 
     VkSampler textureSampler;
 
@@ -308,29 +325,31 @@ private:
     PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR = NULL;
 #endif
 
-#if LAYERS_UNIFORM
     std::vector<VkBuffer> uniformBuffers;
     std::vector<VkDeviceMemory> uniformBuffersMemory;
-#endif
 
-
-
-    std::vector<VkBuffer> vertexBuffers;
-    std::vector<VkDeviceMemory> vertexBufferMemories;
-
-
-
+    // common stuff
     int platformIndex = 0;
     int deviceIndex = 0;
 
+    bool deviceLocalBuffers = true;
     bool useExternalMemory = true;
     bool useExternalSemaphore = true;
 
+
+    // OpenCL stuff
     cl_external_memory_handle_type_khr externalMemType = 0;
 
     cl::Context context;
     cl::CommandQueue commandQueue;
     cl::Kernel kernel;
+
+    //
+    cl::Image h0pk;
+    cl::Image h0mk;
+    cl::Image hkt_ping_pong[2];
+    cl::Image phase_pingpong[2];
+
 
 #if 1
     size_t ocl_max_img2d_width,
@@ -339,6 +358,7 @@ private:
     cl_ulong ocl_max_alloc_size, ocl_mem_size;
 #endif
 
+    // final computation result with displacements, needs to follow swap-chain scheme
     std::vector<std::unique_ptr<cl::Image>> mems;
     std::vector<cl::Semaphore> signalSemaphores;
 
@@ -566,30 +586,9 @@ private:
                 std::memcpy(vprops.data(), props,
                             sizeof(cl_mem_properties) * vprops.size());
 
-
-#if TEX_ARRAY_LAYERS > 1
-                mems[i].reset(new cl::Image2DArray(
-                    context, vprops, CL_MEM_WRITE_ONLY,
-                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), TEX_ARRAY_LAYERS,
-                    gwx, gwy));
-#elif TEX_3D_LAYERS > 1
-                mems[i].reset(
-                    new cl::Image3D(context, vprops, CL_MEM_WRITE_ONLY,
-                                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8),
-                                    gwx, gwy, TEX_3D_LAYERS));
-#elif TEX_1D_ARRAY_PATH
-                mems[i].reset(new cl::Image1DArray(
-                    context, vprops, CL_MEM_WRITE_ONLY,
-                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwy, gwx));
-#elif TEX_1D_PATH
-                mems[i].reset(new cl::Image1D(
-                    context, vprops, CL_MEM_WRITE_ONLY,
-                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwy * gwx));
-#else
                 mems[i].reset(new cl::Image2D(
                     context, vprops, CL_MEM_WRITE_ONLY,
                     cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwx, gwy));
-#endif
             }
             else
             {
@@ -624,9 +623,7 @@ private:
         createSwapChain();
         createImageViews();
         createRenderPass();
-#if LAYERS_UNIFORM
         createUniformBuffer();
-#endif
         createDescriptorSetLayout();
         createGraphicsPipeline();
         createFramebuffers();
@@ -735,6 +732,7 @@ private:
         for (auto buffer : vertexBuffers) {
             vkDestroyBuffer(device, buffer, nullptr);
         }
+
         for (auto bufferMemory : vertexBufferMemories) {
             vkFreeMemory(device, bufferMemory, nullptr);
         }
@@ -752,14 +750,10 @@ private:
             }
             vkDestroyFence(device, inFlightFences[i], nullptr);
 
-#if LAYERS_UNIFORM
             vkDestroyBuffer(device, uniformBuffers[i], nullptr);
             vkFreeMemory(device, uniformBuffersMemory[i], nullptr);
         }
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
-#else
-        }
-#endif
 
 
         vkDestroyCommandPool(device, commandPool, nullptr);
@@ -1156,7 +1150,6 @@ private:
         }
     }
 
-#if LAYERS_UNIFORM
     void createUniformBuffer()
     {
         VkDeviceSize bufferSize = sizeof(UniformBufferObject);
@@ -1173,7 +1166,6 @@ private:
                          uniformBuffersMemory[i]);
         }
     }
-#endif
 
     void createDescriptorSetLayout()
     {
@@ -1185,7 +1177,6 @@ private:
         samplerLayoutBinding.pImmutableSamplers = nullptr;
         samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-#if LAYERS_UNIFORM
         VkDescriptorSetLayoutBinding uniformLayoutBinding{};
         uniformLayoutBinding.binding = 1;
         uniformLayoutBinding.descriptorCount = 1;
@@ -1196,11 +1187,7 @@ private:
         std::array<VkDescriptorSetLayoutBinding, 2> bindings = {
             samplerLayoutBinding, uniformLayoutBinding
         };
-#else
-        std::array<VkDescriptorSetLayoutBinding, 1> bindings = {
-            samplerLayoutBinding
-        };
-#endif
+
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
         layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -1216,19 +1203,8 @@ private:
 
     void createGraphicsPipeline()
     {
-        auto vertShaderCode = readFile("juliavk.vert.spv");
-
-#if TEX_ARRAY_LAYERS > 1
-        auto fragShaderCode = readFile("juliavk_array.frag.spv");
-#elif TEX_3D_LAYERS > 1
-        auto fragShaderCode = readFile("juliavk_3d.frag.spv");
-#elif TEX_1D_ARRAY_PATH > 0
-        auto fragShaderCode = readFile("juliavk_1d_array.frag.spv");
-#elif TEX_1D_PATH > 0
-        auto fragShaderCode = readFile("juliavk_1d.frag.spv");
-#else
-        auto fragShaderCode = readFile("juliavk.frag.spv");
-#endif
+        auto vertShaderCode = readFile("ocean.vert.spv");
+        auto fragShaderCode = readFile("ocean.frag.spv");
 
         VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
         VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
@@ -1251,11 +1227,18 @@ private:
             vertShaderStageInfo, fragShaderStageInfo
         };
 
+
+        // vertex info
+        auto bindingDescription = Vertex::getBindingDescription();
+        auto attributeDescriptions = Vertex::getAttributeDescriptions();
+
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-        vertexInputInfo.sType =
-            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 0;
-        vertexInputInfo.vertexAttributeDescriptionCount = 0;
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInputInfo.vertexBindingDescriptionCount = 1;
+        vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
+        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
+        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
+
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType =
@@ -1401,21 +1384,88 @@ private:
 
 
     void createVertexBuffers() {
+
+
+#if 0
+        // Add Quad Strip primitve sets
+        // Each quad strip draws one row of NX quads
+        for (int iBaseTo, iBaseFrom = 0, iY = 0; iY < NY;
+             iY++, iBaseFrom = iBaseTo)
+        {
+            iBaseTo = iBaseFrom + NX + 1;
+            DrawElementsUInt* indices =
+                new DrawElementsUInt(PrimitiveSet::QUAD_STRIP, NX + NX + 2);
+            for (int iX = 0; iX <= NX; iX++)
+            {
+                (*indices)[iX + iX + 0] = iBaseFrom + iX;
+                (*indices)[iX + iX + 1] = iBaseTo + iX;
+            }
+            geometry->addPrimitiveSet(indices);
+        }
+#endif
+
+        int iCXY = ( NX + 1 ) * ( NY + 1 );
+        verts.resize(iCXY);
+
+        // Initialize vertices and normals to default (row, column, 0) and (0,
+        // 0, 1) This step is not really neccessary (its just in case something
+        // went wrong) Verts and normals will be updated with wave height field
+        // every frame
+        cl_float dfY = -0.5 * (NY * WY), dfBaseX = -0.5 * (NX * WX);
+        cl_float tx=0.f, ty=0.f, dtx = 1.f / NX, dty= 1.f / NY;
+        for (int iBase = 0, iY = 0; iY <= NY; iY++, iBase += NX + 1)
+        {
+            double dfX = dfBaseX;
+            for (int iX = 0; iX <= NX; iX++)
+            {
+                verts[iBase + iX].pos = glm::vec3(dfX, dfY, 0.0);
+                verts[iBase + iX].tc = glm::vec2(tx, ty);
+                tx += dtx;
+                dfX += WX;
+            }
+            dfY += WY;
+            ty += dty;
+        }
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = sizeof(verts[0]) * verts.size();
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
         VkMemoryPropertyFlags properties =
-            deviceLocalBuffers && useExternalMemory ?
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT :
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
         vertexBuffers.resize(swapChainImages.size());
         vertexBufferMemories.resize(swapChainImages.size());
 
         for (size_t i = 0; i < swapChainImages.size(); i++) {
-            createShareableBuffer(
-                sizeof(cl_float4) * numBodies,
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                properties,
-                vertexBuffers[i],
-                vertexBufferMemories[i]);
+
+            if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffers[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to create vertex buffer!");
+            }
+
+            VkMemoryRequirements memRequirements;
+            vkGetBufferMemoryRequirements(device, vertexBuffers[i], &memRequirements);
+
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = memRequirements.size;
+            allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, properties);
+
+            if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemories[i]) != VK_SUCCESS) {
+                throw std::runtime_error("failed to allocate vertex buffer memory!");
+            }
+
+            vkBindBufferMemory(device, vertexBuffers[i], vertexBufferMemories[i], 0);
+        }
+
+        for (size_t i = 0; i < swapChainImages.size(); i++)
+        {
+            void* data;
+            vkMapMemory(device, vertexBufferMemories[i], 0, bufferInfo.size, 0, &data);
+                memcpy(data, verts.data(), (size_t) bufferInfo.size);
+            vkUnmapMemory(device, vertexBufferMemories[i]);
         }
     }
 
@@ -1431,7 +1481,7 @@ private:
         uint32_t texWidth = static_cast<uint32_t>(gwx);
         uint32_t texHeight = static_cast<uint32_t>(gwy);
 
-        VkDeviceSize imageSize = texWidth * texHeight * 4 * TEX_LAYERS;
+        VkDeviceSize imageSize = texWidth * texHeight * 4;
 
         createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
@@ -1447,13 +1497,6 @@ private:
                 texWidth, texHeight, VK_FORMAT_R8G8B8A8_UNORM, tiling,
                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                 properties, textureImages[i], textureImageMemories[i]
-#if TEX_3D_LAYERS > 1
-                ,
-                VK_IMAGE_TYPE_3D
-#elif TEX_1D_ARRAY_PATH || TEX_1D_PATH
-                ,
-                VK_IMAGE_TYPE_1D
-#endif
             );
             if (useExternalMemory)
             {
@@ -1461,14 +1504,6 @@ private:
                                       VK_FORMAT_R8G8B8A8_UNORM,
                                       VK_IMAGE_LAYOUT_UNDEFINED,
                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-
-#if TEX_ARRAY_LAYERS > 1
-                                      ,
-                                      TEX_ARRAY_LAYERS
-#elif TEX_1D_ARRAY_PATH > 0
-                                      ,
-                                      texHeight
-#endif
                 );
             }
         }
@@ -1482,22 +1517,7 @@ private:
         {
             textureImageViews[i] =
                 createImageView(textureImages[i], VK_FORMAT_R8G8B8A8_UNORM
-#if TEX_ARRAY_LAYERS > 1
-                                ,
-                                VK_IMAGE_VIEW_TYPE_2D_ARRAY, TEX_ARRAY_LAYERS);
-#elif TEX_3D_LAYERS > 1
-                                ,
-                                VK_IMAGE_VIEW_TYPE_3D);
-#elif TEX_1D_ARRAY_PATH
-                                ,
-                                VK_IMAGE_VIEW_TYPE_1D_ARRAY,
-                                static_cast<uint32_t>(gwy));
-#elif TEX_1D_PATH
-                                ,
-                                VK_IMAGE_VIEW_TYPE_1D);
-#else
                 );
-#endif
         }
     }
 
@@ -1578,22 +1598,12 @@ private:
             imageInfo.pNext = &externalMemCreateInfo;
         }
 
-        uint32_t layers = TEX_ARRAY_LAYERS;
-
-#if TEX_1D_ARRAY_PATH > 0
-        layers = height;
-        height = 1;
-#elif TEX_1D_PATH
-        width = width * height;
-        height = 1;
-#endif
-
         imageInfo.imageType = type;
         imageInfo.extent.width = width;
         imageInfo.extent.height = height;
-        imageInfo.extent.depth = TEX_3D_LAYERS;
+        imageInfo.extent.depth = 1;
         imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = layers;
+        imageInfo.arrayLayers = 1;
         imageInfo.format = format;
         imageInfo.tiling = tiling;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1766,7 +1776,6 @@ private:
         endSingleTimeCommands(commandBuffer);
     }
 
-#if LAYERS_UNIFORM
     void transitionUniformLayout(VkBuffer buffer, VkAccessFlagBits src,
                                  VkAccessFlagBits dst)
     {
@@ -1801,13 +1810,10 @@ private:
 
         endSingleTimeCommands(commandBuffer);
     }
-#endif
 
 
     void createDescriptorPool()
     {
-
-#if LAYERS_UNIFORM
         std::array<VkDescriptorPoolSize, 2> poolSizes{};
         poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         poolSizes[0].descriptorCount =
@@ -1816,12 +1822,6 @@ private:
         poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         poolSizes[1].descriptorCount =
             static_cast<uint32_t>(swapChainImages.size());
-#else
-        std::array<VkDescriptorPoolSize, 1> poolSizes{};
-        poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSizes[0].descriptorCount =
-            static_cast<uint32_t>(swapChainImages.size());
-#endif
 
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1861,7 +1861,6 @@ private:
             imageInfo.imageView = textureImageViews[i];
             imageInfo.sampler = textureSampler;
 
-#if LAYERS_UNIFORM
             VkDescriptorBufferInfo bufferInfo{};
             bufferInfo.buffer = uniformBuffers[i];
             bufferInfo.offset = 0;
@@ -1877,9 +1876,6 @@ private:
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             descriptorWrites[1].descriptorCount = 1;
             descriptorWrites[1].pBufferInfo = &bufferInfo;
-#else
-            std::array<VkWriteDescriptorSet, 1> descriptorWrites{};
-#endif
 
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = descriptorSets[i];
@@ -2111,23 +2107,10 @@ private:
 
     void updateTexture(uint32_t currentImage)
     {
-#if LAYERS_UNIFORM
         UniformBufferObject ubo = {};
+        ubo.ocean_size = NX;
 
-#if (TEX_LAYERS > 1)
-        static auto start{ std::chrono::steady_clock::now() };
-        static int prev_frame = current_array_layer;
-
-        auto end = std::chrono::steady_clock::now();
-        const std::chrono::duration<double> secs{ end - start };
-
-        current_array_layer = int(secs.count()) % TEX_LAYERS;
-#else
-        current_array_layer = gwy;
-#endif
-
-        ubo.layer = current_array_layer;
-        ubo.count = TEX_LAYERS;
+        // TODO: dont forget to complement uniform buffer structure
 
         transitionUniformLayout(uniformBuffers[currentImage],
                                 VK_ACCESS_SHADER_READ_BIT,
@@ -2141,7 +2124,6 @@ private:
         transitionUniformLayout(uniformBuffers[currentImage],
                                 VK_ACCESS_TRANSFER_WRITE_BIT,
                                 VK_ACCESS_SHADER_READ_BIT);
-#endif
 
         if (useExternalMemory)
         {
@@ -2152,9 +2134,6 @@ private:
         kernel.setArg(0, *mems[currentImage]);
         kernel.setArg(1, cr);
         kernel.setArg(2, ci);
-#if (TEX_LAYERS > 1)
-        kernel.setArg(3, current_array_layer); // texture array path
-#endif
 
         cl::NDRange lws; // NullRange by default.
         if (lwx > 0 && lwy > 0)
