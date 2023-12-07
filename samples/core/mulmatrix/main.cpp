@@ -151,18 +151,47 @@ void MatrixMultiplication::Multiply()
             cl::Buffer cMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY,
                                   mMatrixDimension * mMatrixDimension
                                       * sizeof(int));
+            try
+            {
+                kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange),
+                           mMatrixDimension, gpu, aMatBuffer, bMatBuffer,
+                           cMatBuffer);
+            } catch (cl::Error err)
+            {
+                std::cout << "Error 1: " << err.what() << std::endl;
+                exit(-1);
+            }
+            try
+            {
+                mCommandQueues[gpu].finish();
+            } catch (cl::Error err)
+            {
+                std::cout << "Error 2: " << err.what() << std::endl;
+                exit(-1);
+            }
 
-            kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange),
-                       mMatrixDimension, gpu, aMatBuffer, bMatBuffer,
-                       cMatBuffer);
-            mCommandQueues[gpu].finish();
 
-            if (gpu == 0)
-                cl::copy(mCommandQueues[gpu], cMatBuffer, mMatrixC.begin(),
-                         mMatrixC.end());
+            if (gpu == 0) try
+                {
+                    cl::copy(mCommandQueues[gpu], cMatBuffer, mMatrixC.begin(),
+                             mMatrixC.end());
+                } catch (cl::Error err)
+                {
+                    std::cout << "Error 3: " << err.what() << std::endl;
+                    exit(-1);
+                }
+
             else
-                cl::copy(mCommandQueues[gpu], cMatBuffer, mMatrixD.begin(),
-                         mMatrixD.end());
+                try
+                {
+                    cl::copy(mCommandQueues[gpu], cMatBuffer, mMatrixD.begin(),
+                             mMatrixD.end());
+                } catch (cl::Error err)
+                {
+                    std::cout << "Error 4: " << err.what() << std::endl;
+                    exit(-1);
+                }
+
 
 
             std::lock_guard<std::mutex> lk(m);
