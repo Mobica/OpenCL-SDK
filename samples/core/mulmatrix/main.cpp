@@ -2,6 +2,9 @@
 #include <CL/opencl.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <thread>
 #include <chrono>
 #include <iostream>
 #include <fstream>
@@ -122,7 +125,7 @@ void MatrixMultiplication::Multiply()
 {
     std::mutex m;
     std::condition_variable cv;
-    std::atomic<int> threads = 0;
+    std::atomic<int> threads(0);
 
     auto start = std::chrono::system_clock::now();
 
