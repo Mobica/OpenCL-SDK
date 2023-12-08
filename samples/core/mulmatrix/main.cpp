@@ -158,7 +158,8 @@ void MatrixMultiplication::Multiply()
                            cMatBuffer);
             } catch (cl::Error err)
             {
-                std::cout << "Error 1: " << err.what() << std::endl;
+                std::cout << "Error 1: " << (int)err.err() << " " << err.what()
+                          << std::endl;
                 exit(-1);
             }
             try
@@ -166,7 +167,8 @@ void MatrixMultiplication::Multiply()
                 mCommandQueues[gpu].finish();
             } catch (cl::Error err)
             {
-                std::cout << "Error 2: " << err.what() << std::endl;
+                std::cout << "Error 2: " << (int)err.err() << " " << err.what()
+                          << std::endl;
                 exit(-1);
             }
 
@@ -177,7 +179,8 @@ void MatrixMultiplication::Multiply()
                              mMatrixC.end());
                 } catch (cl::Error err)
                 {
-                    std::cout << "Error 3: " << err.what() << std::endl;
+                    std::cout << "Error 3: " << (int)err.err() << " "
+                              << err.what() << std::endl;
                     exit(-1);
                 }
 
@@ -188,7 +191,8 @@ void MatrixMultiplication::Multiply()
                              mMatrixD.end());
                 } catch (cl::Error err)
                 {
-                    std::cout << "Error 4: " << err.what() << std::endl;
+                    std::cout << "Error 4: " << (int)err.err() << " "
+                              << err.what() << std::endl;
                     exit(-1);
                 }
 
@@ -291,12 +295,19 @@ int main()
         std::vector<cl::Platform> platforms;
         cl::Platform::get(&platforms);
 
-        MatrixMultiplication nVidiaPlatformMul(platforms[0]);
-        nVidiaPlatformMul.Multiply();
-        MatrixMultiplication intelPlatformMul(platforms[1]);
-        intelPlatformMul.Multiply();
-        MatrixMultiplication twoPlatformMul(platforms);
-        twoPlatformMul.Multiply();
+        if (!platforms.empty())
+        {
+            MatrixMultiplication nVidiaPlatformMul(platforms[0]);
+            nVidiaPlatformMul.Multiply();
+        }
+        if (platforms.size() > 1)
+        {
+
+            MatrixMultiplication intelPlatformMul(platforms[1]);
+            intelPlatformMul.Multiply();
+            MatrixMultiplication twoPlatformMul(platforms);
+            twoPlatformMul.Multiply();
+        }
 
         char exit;
         std::cout << "Type any letter and press enter to exit." << std::endl;
