@@ -1,5 +1,7 @@
 kernel void mulMatrix(
-    const int N,
+    const int N, //first matrix rows number
+	const int M, //first matrix columns number
+	const int P, //second matrix columns number
     int gpu,
     global int* A,
     global int* B,
@@ -11,12 +13,11 @@ kernel void mulMatrix(
     int i = element + N/2 * gpu;
     int j = get_global_id(1);
     int tmp;
-    if ( (i < N) && (j <N) )
     {
         tmp = 0;
-        for(k;k<N;k++)
+        for(k;k<M;k++)
         {
-            tmp += A[element*N+k] * B[k*N+j];
+			tmp += A[element*N+k] * B[k*P +j];
         }
         C[i*N+j] = tmp;
     }

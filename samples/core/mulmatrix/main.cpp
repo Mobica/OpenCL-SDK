@@ -9,37 +9,21 @@
 #include <iostream>
 #include <fstream>
 
+#include <CL/SDK/CLI.hpp>
 
-std::string kernelMulMatrix =
-    "__kernel void mulMatrix(                 \n"
-    "   const int N,                                                        \n"
-    "   int gpu,                                                            \n"
-    "   __global int* A,                                                    \n"
-    "   __global int* B,                                                    \n"
-    "   __global int* C)                                                    \n"
-    "{                                                                      \n"
-    "   int k = 0;                                                          \n"
-    "   int element = get_global_id(0);                                     \n"
-    "   int i = element + N/2 * gpu;                                        \n"
-    "   int j = get_global_id(1);                                           \n"
-    "   int tmp;                                                            \n"
-    "   if ( (i < N) && (j <N) )                                            \n"
-    "   {                                                                   \n"
-    "       tmp = 0;                                                        \n"
-    "       for(k;k<N;k++)                                                  \n"
-    "       {                                                               \n"
-    "           tmp += A[element*N+k] * B[k*N+j];                           \n"
-    "       }                                                               \n"
-    "       C[i*N+j] = tmp;                                                 \n"
-    "   }                                                                   \n"
-    "}                                                                      \n"
-    "\n";
+struct MatrixOptions
+{
+     int fstMtxRows;
+     int fstMtxCols;
+     int sndMtxRows;
+     int sndMtxCols;
+ };
 
 class MatrixMultiplication {
 public:
-    MatrixMultiplication(cl::Platform& platform);//, std::string& kernelSource);
-    MatrixMultiplication(std::vector<cl::Platform>& platforms);//,
-                         //std::string& kernelSource);
+    MatrixMultiplication(cl::Platform& platform, MatrixOptions& opts);
+    MatrixMultiplication(std::vector<cl::Platform>& platforms,
+                         MatrixOptions& opts);
     ~MatrixMultiplication() = default;
 
     void Multiply();
@@ -54,7 +38,6 @@ private:
     bool LoadKernel();
 
     std::string mKernelSource;
-    const int mMatrixDimension = 4 * 1024;
     std::vector<int> mMatrixA;
     std::vector<int> mMatrixB;
     std::vector<int> mMatrixC;
@@ -64,11 +47,13 @@ private:
     std::vector<cl::Context> mContexts;
     std::vector<cl::CommandQueue> mCommandQueues;
     std::vector<cl::Platform> mPlatforms;
+
+    MatrixOptions mOpts;
 };
 
-MatrixMultiplication::MatrixMultiplication(cl::Platform& platform)//,
-                                           //std::string& kernelSource)
-//    : mKernelSource(kernelSource)
+MatrixMultiplication::MatrixMultiplication(
+    cl::Platform& platform, MatrixOptions& opts)
+    : mOpts(opts)
 {
     if (!LoadKernel())
     {
@@ -80,9 +65,11 @@ MatrixMultiplication::MatrixMultiplication(cl::Platform& platform)//,
     PrepareMatrices();
 };
 
-MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms)//,
-                                           //std::string& kernelSource)
-    : mPlatforms(platforms)//, mKernelSource(kernelSource)
+MatrixMultiplication::MatrixMultiplication(
+    std::vector<cl::Platform>& platforms,
+    MatrixOptions& opts)
+    : mPlatforms(platforms)
+    , mOpts(opts)
 {
     if (!LoadKernel())
     {
@@ -127,20 +114,28 @@ void MatrixMultiplication::Multiply()
     std::condition_variable cv;
     std::atomic<int> threads(0);
 
+    auto GPUs = mContexts.size();
+    if (mOpts.fstMtxRows == 1 && GPUs > 1)
+    {
+        std::cout
+            << "First matrix has only 1 row, nothing to divide on two GPUs"
+            << std::endl;
+        GPUs = 1;
+    }
     auto start = std::chrono::system_clock::now();
 
-    cl::NDRange matrixRange(mMatrixDimension / mContexts.size(),
-                            mMatrixDimension);
+    cl::NDRange matrixRange(mOpts.fstMtxRows / GPUs,
+                            mOpts.sndMtxCols);
 
-    for (int gpu = 0; gpu < mContexts.size(); ++gpu)
+    for (int gpu = 0; gpu < GPUs; ++gpu)
     {
-        auto half = (mMatrixDimension * mMatrixDimension) / mContexts.size();
+        auto half = (mOpts.fstMtxRows * mOpts.fstMtxCols) / GPUs;
         auto start = half * gpu;
         auto stop = start + half;
 
         threads++;
         std::thread work([&, gpu]() {
-            cl::compatibility::make_kernel<int, int, cl::Buffer, cl::Buffer,
+            cl::compatibility::make_kernel<int, int,int, int, cl::Buffer, cl::Buffer,
                                            cl::Buffer>
                 kernelFunc(mPrograms[gpu], "mulMatrix");
 
@@ -149,12 +144,12 @@ void MatrixMultiplication::Multiply()
             cl::Buffer bMatBuffer(mContexts[gpu], mMatrixB.begin(),
                                   mMatrixB.end(), true);
             cl::Buffer cMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY,
-                                  mMatrixDimension * mMatrixDimension
+                                  mOpts.fstMtxRows * mOpts.sndMtxCols
                                       * sizeof(int));
             try
             {
                 kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange),
-                           mMatrixDimension, gpu, aMatBuffer, bMatBuffer,
+                           mOpts.fstMtxRows,mOpts.fstMtxCols, mOpts.sndMtxCols, gpu, aMatBuffer, bMatBuffer,
                            cMatBuffer);
             } catch (cl::Error err)
             {
@@ -208,7 +203,10 @@ void MatrixMultiplication::Multiply()
     std::unique_lock<std::mutex> lock(m);
     cv.wait(lock, [&]() { return threads == 0; });
 
-    MergeData();
+    if (GPUs > 1)
+    {
+        MergeData();
+    }
 
     auto end = std::chrono::system_clock::now();
     auto diff =
@@ -222,24 +220,22 @@ void MatrixMultiplication::Multiply()
 
 void MatrixMultiplication::MergeData()
 {
-    if (mContexts.size() > 1)
-    {
-        auto start = std::chrono::system_clock::now();
+    auto start = std::chrono::system_clock::now();
 
-        std::transform(mMatrixC.begin(), mMatrixC.end(), mMatrixD.begin(),
-                       mMatrixC.begin(), std::plus<int>());
+    std::transform(mMatrixC.begin(), mMatrixC.end(), mMatrixD.begin(),
+                    mMatrixC.begin(), std::plus<int>());
 
-        auto end = std::chrono::system_clock::now();
-        auto diff =
-            std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-        std::cout << "Merging data time: " << diff.count()
-                  << " ms"
-                  << std::endl;
-    }
+    auto end = std::chrono::system_clock::now();
+    auto diff =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Merging data time: " << diff.count()
+                << " ms"
+                << std::endl;
 };
 
 bool MatrixMultiplication::LoadKernel()
 {
+    //std::string fileName("C:\\RND200\\OpenCL-SDK\\samples\\core\\mulmatrix\\mulMatrix.cl");
     std::string fileName("mulMatrix.cl");
     std::ifstream stream(fileName.c_str());
     if (!stream.is_open())
@@ -256,9 +252,11 @@ bool MatrixMultiplication::LoadKernel()
 
 void MatrixMultiplication::PrepareMatrices()
 {
-    auto size = mMatrixDimension * mMatrixDimension;
+    auto size = mOpts.fstMtxRows * mOpts.fstMtxCols;
     mMatrixA = std::move(std::vector<int>(size, 5));
+    size = mOpts.sndMtxRows * mOpts.sndMtxCols;
     mMatrixB = std::move(std::vector<int>(size, 6));
+    size = mOpts.fstMtxRows * mOpts.sndMtxCols;
     mMatrixC = std::move(std::vector<int>(size, 0));
     mMatrixD = std::move(std::vector<int>(size, 0));
 };
@@ -267,14 +265,14 @@ void MatrixMultiplication::CheckResults()
 {
     int i, j;
     float cval, errsq, err;
-    cval = (float)mMatrixDimension * 5 * 6;
+    cval = (float)mOpts.fstMtxCols * 5 * 6;
     errsq = 0.0f;
 
-    for (i = 0; i < mMatrixDimension; i++)
+    for (i = 0; i < mOpts.fstMtxRows; i++)
     {
-        for (j = 0; j < mMatrixDimension; j++)
+        for (j = 0; j < mOpts.sndMtxCols; j++)
         {
-            err = (mMatrixC[i * mMatrixDimension + j])
+            err = (mMatrixC[i * mOpts.fstMtxRows + j])
                 - cval;
             errsq += err * err;
         }
@@ -288,8 +286,46 @@ void MatrixMultiplication::CheckResults()
               << std::endl;
 };
 
-int main()
+template <> auto cl::sdk::parse<MatrixOptions>()
 {
+    return std::make_tuple(std::make_shared<TCLAP::ValueArg<int>>(
+                               "p", "cols2", "Second matrix columns number (default 4096)", false,
+            4*1024, "positive integral"),
+                           std::make_shared<TCLAP::ValueArg<int>>(
+                               "m", "cols1", "First matrix columns number (default 4096)", false,
+            4*1024, "positive integral"),
+                           std::make_shared<TCLAP::ValueArg<int>>(
+                               "n", "rows1", "First matrix rows number (default 4096)", false,
+            4*1024, "positive integral")
+
+                           );
+}
+template <>
+MatrixOptions
+cl::sdk::comprehend<MatrixOptions>(
+    std::shared_ptr<TCLAP::ValueArg<int>> sndMtxCols ,
+    std::shared_ptr<TCLAP::ValueArg<int>> fstMtxCols,//2nd matrix rows must be the same as fst matrix column
+    std::shared_ptr<TCLAP::ValueArg<int>> fstMtxRows)
+{
+    return MatrixOptions {fstMtxRows->getValue(),
+                          fstMtxCols->getValue(),
+                          fstMtxCols->getValue(),//2nd matrix rows must be the same as fst matrix column
+                          sndMtxCols->getValue() };
+}
+
+int main(int argc, char* argv[])
+{
+    auto opts =
+        cl::sdk::parse_cli<MatrixOptions>(argc, argv);
+    MatrixOptions matOpts = std::get<0>(opts);
+    
+    int rows1 = matOpts.fstMtxRows;
+    int cols1 = matOpts.fstMtxCols;
+    int rows2 = matOpts.sndMtxRows;
+    int cols2 = matOpts.sndMtxCols;
+    std::cout << "Rows1: " << rows1 << " Cols1: " << cols1
+              << " Rows2: " << rows2 << " Cols2: "<<cols2
+              << std::endl;
     try
     {
         std::vector<cl::Platform> platforms;
@@ -297,15 +333,15 @@ int main()
 
         if (!platforms.empty())
         {
-            MatrixMultiplication nVidiaPlatformMul(platforms[0]);
+            MatrixMultiplication nVidiaPlatformMul(platforms[0], matOpts);
             nVidiaPlatformMul.Multiply();
         }
         if (platforms.size() > 1)
         {
 
-            MatrixMultiplication intelPlatformMul(platforms[1]);
+            MatrixMultiplication intelPlatformMul(platforms[1], matOpts);
             intelPlatformMul.Multiply();
-            MatrixMultiplication twoPlatformMul(platforms);
+            MatrixMultiplication twoPlatformMul(platforms, matOpts);
             twoPlatformMul.Multiply();
         }
 
