@@ -11,19 +11,19 @@
 
 #include <CL/SDK/CLI.hpp>
 
-struct MatrixOptions
+struct MatricesDimensions
 {
-     int fstMtxRows;
-     int fstMtxCols;
-     int sndMtxRows;
-     int sndMtxCols;
+     unsigned int fstMtxRows;
+     unsigned int fstMtxCols;
+     unsigned int sndMtxRows;
+     unsigned int sndMtxCols;
  };
 
 class MatrixMultiplication {
 public:
-    MatrixMultiplication(cl::Platform& platform, MatrixOptions& opts);
+    MatrixMultiplication(cl::Platform& platform, MatricesDimensions& opts);
     MatrixMultiplication(std::vector<cl::Platform>& platforms,
-                         MatrixOptions& opts);
+                          MatricesDimensions& opts);
     ~MatrixMultiplication() = default;
 
     void Multiply();
@@ -48,12 +48,12 @@ private:
     std::vector<cl::CommandQueue> mCommandQueues;
     std::vector<cl::Platform> mPlatforms;
 
-    MatrixOptions mOpts;
+    MatricesDimensions mMatDims;
 };
 
-MatrixMultiplication::MatrixMultiplication(
-    cl::Platform& platform, MatrixOptions& opts)
-    : mOpts(opts)
+MatrixMultiplication::MatrixMultiplication(cl::Platform& platform,
+                                           MatricesDimensions& matDims)
+    : mMatDims(matDims)
 {
     if (!LoadKernel())
     {
@@ -65,11 +65,9 @@ MatrixMultiplication::MatrixMultiplication(
     PrepareMatrices();
 };
 
-MatrixMultiplication::MatrixMultiplication(
-    std::vector<cl::Platform>& platforms,
-    MatrixOptions& opts)
-    : mPlatforms(platforms)
-    , mOpts(opts)
+MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
+                                           MatricesDimensions& matDims)
+    : mPlatforms(platforms), mMatDims(matDims)
 {
     if (!LoadKernel())
     {
@@ -114,8 +112,14 @@ void MatrixMultiplication::Multiply()
     std::condition_variable cv;
     std::atomic<int> threads(0);
 
-    auto GPUs = mContexts.size();
-    if (mOpts.fstMtxRows == 1 && GPUs > 1)
+    int GPUs = static_cast<int>(mContexts.size());
+    if (GPUs > 2)
+    {
+        std::cout << "Maximum number of supported GPUs for usage is 2"
+                  << std::endl;
+        GPUs = 2;
+    }
+    if (mMatDims.fstMtxRows == 1 && GPUs > 1)
     {
         std::cout
             << "First matrix has only 1 row, nothing to divide on two GPUs"
@@ -124,17 +128,34 @@ void MatrixMultiplication::Multiply()
     }
     auto start = std::chrono::system_clock::now();
 
-    cl::NDRange matrixRange(mOpts.fstMtxRows / GPUs,
-                            mOpts.sndMtxCols);
+
+    cl::NDRange matrixRange[2];
+    matrixRange[0] = cl::NDRange(mMatDims.fstMtxRows / GPUs, mMatDims.sndMtxCols);
+    matrixRange[1] = cl::NDRange(mMatDims.fstMtxRows / GPUs, mMatDims.sndMtxCols);
+    if (mMatDims.fstMtxRows % GPUs == 1)
+    {
+        matrixRange[1] =
+            cl::NDRange((mMatDims.fstMtxRows + 1) / GPUs, mMatDims.sndMtxCols);
+    }
+    
+    int from[2];
+    int to[2];
+    from[0] = 0;
+    to[0] = (mMatDims.fstMtxRows * mMatDims.fstMtxCols) / GPUs;
+    if (mMatDims.fstMtxRows % GPUs == 1)
+    {
+        to[0] = ((mMatDims.fstMtxRows - 1) * mMatDims.fstMtxCols) / GPUs;
+    }
+    from[1] = to[0];
+    to[1] = mMatDims.fstMtxRows * mMatDims.fstMtxCols;
 
     for (int gpu = 0; gpu < GPUs; ++gpu)
     {
-        auto half = (mOpts.fstMtxRows * mOpts.fstMtxCols) / GPUs;
-        auto start = half * gpu;
-        auto stop = start + half;
+        auto start = from[gpu];
+        auto stop = to[gpu];
 
         threads++;
-        std::thread work([&, gpu]() {
+        std::thread work([&, gpu, start, stop]() {
             cl::compatibility::make_kernel<int, int,int, int, cl::Buffer, cl::Buffer,
                                            cl::Buffer>
                 kernelFunc(mPrograms[gpu], "mulMatrix");
@@ -144,12 +165,13 @@ void MatrixMultiplication::Multiply()
             cl::Buffer bMatBuffer(mContexts[gpu], mMatrixB.begin(),
                                   mMatrixB.end(), true);
             cl::Buffer cMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY,
-                                  mOpts.fstMtxRows * mOpts.sndMtxCols
+                                  mMatDims.fstMtxRows * mMatDims.sndMtxCols
                                       * sizeof(int));
             try
             {
-                kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange),
-                           mOpts.fstMtxRows,mOpts.fstMtxCols, mOpts.sndMtxCols, gpu, aMatBuffer, bMatBuffer,
+                kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange[gpu]),
+                           mMatDims.fstMtxRows, mMatDims.fstMtxCols,
+                           mMatDims.sndMtxCols, gpu, aMatBuffer, bMatBuffer,
                            cMatBuffer);
             } catch (cl::Error err)
             {
@@ -166,6 +188,7 @@ void MatrixMultiplication::Multiply()
                           << std::endl;
                 exit(-1);
             }
+            
 
 
             if (gpu == 0) try
@@ -252,27 +275,27 @@ bool MatrixMultiplication::LoadKernel()
 
 void MatrixMultiplication::PrepareMatrices()
 {
-    auto size = mOpts.fstMtxRows * mOpts.fstMtxCols;
+    unsigned int size = mMatDims.fstMtxRows * mMatDims.fstMtxCols;
     mMatrixA = std::move(std::vector<int>(size, 5));
-    size = mOpts.sndMtxRows * mOpts.sndMtxCols;
+    size = mMatDims.sndMtxRows * mMatDims.sndMtxCols;
     mMatrixB = std::move(std::vector<int>(size, 6));
-    size = mOpts.fstMtxRows * mOpts.sndMtxCols;
+    size = mMatDims.fstMtxRows * mMatDims.sndMtxCols;
     mMatrixC = std::move(std::vector<int>(size, 0));
     mMatrixD = std::move(std::vector<int>(size, 0));
 };
 
 void MatrixMultiplication::CheckResults()
 {
-    int i, j;
+    unsigned int i, j;
     float cval, errsq, err;
-    cval = (float)mOpts.fstMtxCols * 5 * 6;
+    cval = (float)mMatDims.fstMtxCols * 5 * 6;
     errsq = 0.0f;
 
-    for (i = 0; i < mOpts.fstMtxRows; i++)
+    for (i = 0; i < mMatDims.fstMtxRows; i++)
     {
-        for (j = 0; j < mOpts.sndMtxCols; j++)
+        for (j = 0; j < mMatDims.sndMtxCols; j++)
         {
-            err = (mMatrixC[i * mOpts.fstMtxRows + j])
+            err = (mMatrixC[i * mMatDims.sndMtxCols + j])
                 - cval;
             errsq += err * err;
         }
@@ -286,28 +309,26 @@ void MatrixMultiplication::CheckResults()
               << std::endl;
 };
 
-template <> auto cl::sdk::parse<MatrixOptions>()
+template <> auto cl::sdk::parse<MatricesDimensions>()
 {
-    return std::make_tuple(std::make_shared<TCLAP::ValueArg<int>>(
+    return std::make_tuple(
+        std::make_shared<TCLAP::ValueArg<unsigned int>>(
                                "p", "cols2", "Second matrix columns number (default 4096)", false,
-            4*1024, "positive integral"),
-                           std::make_shared<TCLAP::ValueArg<int>>(
-                               "m", "cols1", "First matrix columns number (default 4096)", false,
-            4*1024, "positive integral"),
-                           std::make_shared<TCLAP::ValueArg<int>>(
-                               "n", "rows1", "First matrix rows number (default 4096)", false,
-            4*1024, "positive integral")
-
-                           );
+           4096, "positive integral"),
+        std::make_shared<TCLAP::ValueArg<unsigned int>>(
+                               "n", "cols1", "First matrix columns number (default 4096)", false,
+            4096, "positive integral"),
+        std::make_shared<TCLAP::ValueArg<unsigned int>>(
+                               "m", "rows1", "First matrix rows number (default 4096)", false,
+           4096, "positive integral"));
 }
 template <>
-MatrixOptions
-cl::sdk::comprehend<MatrixOptions>(
-    std::shared_ptr<TCLAP::ValueArg<int>> sndMtxCols ,
-    std::shared_ptr<TCLAP::ValueArg<int>> fstMtxCols,//2nd matrix rows must be the same as fst matrix column
-    std::shared_ptr<TCLAP::ValueArg<int>> fstMtxRows)
+MatricesDimensions cl::sdk::comprehend<MatricesDimensions>(
+    std::shared_ptr<TCLAP::ValueArg<unsigned int>> sndMtxCols ,
+    std::shared_ptr<TCLAP::ValueArg<unsigned int>> fstMtxCols,//2nd matrix rows must be the same as fst matrix column
+    std::shared_ptr<TCLAP::ValueArg<unsigned int>> fstMtxRows)
 {
-    return MatrixOptions {fstMtxRows->getValue(),
+    return MatricesDimensions{fstMtxRows->getValue(),
                           fstMtxCols->getValue(),
                           fstMtxCols->getValue(),//2nd matrix rows must be the same as fst matrix column
                           sndMtxCols->getValue() };
@@ -315,17 +336,18 @@ cl::sdk::comprehend<MatrixOptions>(
 
 int main(int argc, char* argv[])
 {
-    auto opts =
-        cl::sdk::parse_cli<MatrixOptions>(argc, argv);
-    MatrixOptions matOpts = std::get<0>(opts);
+    auto opts = cl::sdk::parse_cli<MatricesDimensions>(argc, argv);
+    MatricesDimensions matDims = std::get<0>(opts);
     
-    int rows1 = matOpts.fstMtxRows;
-    int cols1 = matOpts.fstMtxCols;
-    int rows2 = matOpts.sndMtxRows;
-    int cols2 = matOpts.sndMtxCols;
-    std::cout << "Rows1: " << rows1 << " Cols1: " << cols1
-              << " Rows2: " << rows2 << " Cols2: "<<cols2
+    unsigned int rows1 = matDims.fstMtxRows;
+    unsigned int cols1 = matDims.fstMtxCols;
+    unsigned int rows2 = matDims.sndMtxRows;
+    unsigned int cols2 = matDims.sndMtxCols;
+    std::cout << "Matrices given for multiplication: A[" << rows1 << "x" << cols1 << "] x B["
+              << rows2 << "x" << cols2 << "]" << std::endl;
+    std::cout << "-------------------------------------------------"
               << std::endl;
+
     try
     {
         std::vector<cl::Platform> platforms;
@@ -333,15 +355,15 @@ int main(int argc, char* argv[])
 
         if (!platforms.empty())
         {
-            MatrixMultiplication nVidiaPlatformMul(platforms[0], matOpts);
+            MatrixMultiplication nVidiaPlatformMul(platforms[0], matDims);
             nVidiaPlatformMul.Multiply();
         }
         if (platforms.size() > 1)
         {
 
-            MatrixMultiplication intelPlatformMul(platforms[1], matOpts);
+            MatrixMultiplication intelPlatformMul(platforms[1], matDims);
             intelPlatformMul.Multiply();
-            MatrixMultiplication twoPlatformMul(platforms, matOpts);
+            MatrixMultiplication twoPlatformMul(platforms, matDims);
             twoPlatformMul.Multiply();
         }
 
