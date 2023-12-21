@@ -155,9 +155,9 @@ void MatrixMultiplication::Multiply()
         auto stop = to[gpu];
 
         threads++;
-        std::thread work([&, gpu, start, stop]() {
-            cl::compatibility::make_kernel<int, int,int, int, cl::Buffer, cl::Buffer,
-                                           cl::Buffer>
+        std::thread work([&, gpu, start, stop]() 
+        {
+            cl::KernelFunctor<int, int, int, int, cl::Buffer, cl::Buffer, cl::Buffer>
                 kernelFunc(mPrograms[gpu], "mulMatrix");
 
             cl::Buffer aMatBuffer(mContexts[gpu], mMatrixA.begin() + start,
@@ -336,7 +336,7 @@ MatricesDimensions cl::sdk::comprehend<MatricesDimensions>(
 
 int main(int argc, char* argv[])
 {
-    auto opts = cl::sdk::parse_cli<MatricesDimensions>(argc, argv);
+    auto opts = cl::sdk::parse_cli<MatricesDimensions>(argc, argv, "OpenCL SDK Matrices multiplication example");
     MatricesDimensions matDims = std::get<0>(opts);
     
     unsigned int rows1 = matDims.fstMtxRows;
