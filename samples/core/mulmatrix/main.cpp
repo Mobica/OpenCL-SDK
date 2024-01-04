@@ -8,6 +8,8 @@
 #include <chrono>
 #include <iostream>
 #include <fstream>
+#include <random>
+
 
 #include <CL/SDK/CLI.hpp>
 
@@ -19,29 +21,54 @@ struct MatricesDimensions
      unsigned int sndMtxCols;
  };
 
+struct Matrix
+{
+     unsigned int mRows;
+     unsigned int mCols;
+     std::vector<int> mData;
+
+     Matrix(int rows, int cols)
+         : mRows(rows), mCols(cols), mData(std::vector<int>(mRows*mCols,0))
+     {
+     };
+     void GenerateData(int from, int to)
+     {
+         std::random_device randDev;
+         std::mt19937 generator(randDev());
+         std::uniform_int_distribution<int> distr(from, to);
+
+         auto size = mRows * mCols;
+         std::vector<int> data;
+         data.reserve(size);
+         for (unsigned int i = 0; i < size; ++i)
+         {
+             data.push_back(distr(generator));
+         }
+         mData = std::move(data);
+     };
+};
+
 class MatrixMultiplication {
 public:
-    MatrixMultiplication(cl::Platform& platform, MatricesDimensions& opts);
+     MatrixMultiplication(cl::Platform& platform, MatricesDimensions& matDims,
+                          Matrix& a, Matrix& b);
     MatrixMultiplication(std::vector<cl::Platform>& platforms,
-                          MatricesDimensions& opts);
+                          MatricesDimensions& matDims, Matrix& a, Matrix& b);
     ~MatrixMultiplication() = default;
 
     void Multiply();
 
 private:
-    void PrepareMatrices();
+    //void PrepareMatrices();
+    //std::vector<int> GenerateMatrix(unsigned int size);
     void CreateContextsAndCommandQueues();
     void CreatePrograms();
     void MergeData();
-    void CheckResults();
+    //void CheckResults();
 
     bool LoadKernel();
 
     std::string mKernelSource;
-    std::vector<int> mMatrixA;
-    std::vector<int> mMatrixB;
-    std::vector<int> mMatrixC;
-    std::vector<int> mMatrixD;
 
     std::vector<cl::Program> mPrograms;
     std::vector<cl::Context> mContexts;
@@ -49,11 +76,17 @@ private:
     std::vector<cl::Platform> mPlatforms;
 
     MatricesDimensions mMatDims;
+    Matrix& A;
+    Matrix& B;
+    Matrix result;
+    Matrix helper;
 };
 
 MatrixMultiplication::MatrixMultiplication(cl::Platform& platform,
-                                           MatricesDimensions& matDims)
-    : mMatDims(matDims)
+                                           MatricesDimensions& matDims,
+                                           Matrix& a, Matrix& b)
+    : mMatDims(matDims), A(a), B(b), result(Matrix(A.mRows, B.mCols)),
+      helper(Matrix(0, 0))
 {
     if (!LoadKernel())
     {
@@ -62,12 +95,13 @@ MatrixMultiplication::MatrixMultiplication(cl::Platform& platform,
     mPlatforms.push_back(platform);
     CreateContextsAndCommandQueues();
     CreatePrograms();
-    PrepareMatrices();
+    //PrepareMatrices();
 };
 
 MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
-                                           MatricesDimensions& matDims)
-    : mPlatforms(platforms), mMatDims(matDims)
+                                           MatricesDimensions& matDims,
+                                           Matrix& a, Matrix& b)
+    : mPlatforms(platforms), mMatDims(matDims), A(a), B(b), result(Matrix(A.mRows, B.mCols)), helper(Matrix(0, 0))
 {
     if (!LoadKernel())
     {
@@ -75,7 +109,7 @@ MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
     }
     CreateContextsAndCommandQueues();
     CreatePrograms();
-    PrepareMatrices();
+    //PrepareMatrices();
 };
 
 void MatrixMultiplication::CreateContextsAndCommandQueues()
@@ -87,7 +121,7 @@ void MatrixMultiplication::CreateContextsAndCommandQueues()
         std::cout << "Platform: " << name << std::endl;
 
         std::vector<cl::Device> platformDevices;
-        platform.getDevices(CL_DEVICE_TYPE_ALL, &platformDevices);
+        platform.getDevices(CL_DEVICE_TYPE_GPU, &platformDevices);//CL_DEVICE_TYPE_ALL
         if (platformDevices.size() > 0)
         {
             cl::Context context(platformDevices);
@@ -160,19 +194,18 @@ void MatrixMultiplication::Multiply()
             cl::KernelFunctor<int, int, int, int, cl::Buffer, cl::Buffer, cl::Buffer>
                 kernelFunc(mPrograms[gpu], "mulMatrix");
 
-            cl::Buffer aMatBuffer(mContexts[gpu], mMatrixA.begin() + start,
-                                  mMatrixA.begin() + stop, true);
-            cl::Buffer bMatBuffer(mContexts[gpu], mMatrixB.begin(),
-                                  mMatrixB.end(), true);
-            cl::Buffer cMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY,
-                                  mMatDims.fstMtxRows * mMatDims.sndMtxCols
-                                      * sizeof(int));
+            cl::Buffer aMatBuffer(mContexts[gpu], A.mData.begin() + start,
+                                  A.mData.begin() + stop, true);
+            cl::Buffer bMatBuffer(mContexts[gpu], B.mData.begin(),
+                                  B.mData.end(), true);
+            cl::Buffer resultMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY,
+                                       mMatDims.fstMtxRows * mMatDims.sndMtxCols * sizeof(int));
             try
             {
                 kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange[gpu]),
                            mMatDims.fstMtxRows, mMatDims.fstMtxCols,
                            mMatDims.sndMtxCols, gpu, aMatBuffer, bMatBuffer,
-                           cMatBuffer);
+                           resultMatBuffer);
             } catch (cl::Error err)
             {
                 std::cout << "Error 1: " << (int)err.err() << " " << err.what()
@@ -193,8 +226,9 @@ void MatrixMultiplication::Multiply()
 
             if (gpu == 0) try
                 {
-                    cl::copy(mCommandQueues[gpu], cMatBuffer, mMatrixC.begin(),
-                             mMatrixC.end());
+                    cl::copy(mCommandQueues[gpu], resultMatBuffer,
+                             result.mData.begin(),
+                             result.mData.end());
                 } catch (cl::Error err)
                 {
                     std::cout << "Error 3: " << (int)err.err() << " "
@@ -205,15 +239,17 @@ void MatrixMultiplication::Multiply()
             else
                 try
                 {
-                    cl::copy(mCommandQueues[gpu], cMatBuffer, mMatrixD.begin(),
-                             mMatrixD.end());
+                    helper = std::move(Matrix(result.mRows, result.mCols));
+
+                    cl::copy(mCommandQueues[gpu], resultMatBuffer,
+                             helper.mData.begin(),
+                             helper.mData.end());
                 } catch (cl::Error err)
                 {
                     std::cout << "Error 4: " << (int)err.err() << " "
                               << err.what() << std::endl;
                     exit(-1);
                 }
-
 
 
             std::lock_guard<std::mutex> lk(m);
@@ -238,15 +274,17 @@ void MatrixMultiplication::Multiply()
               << " ms"
               << std::endl;
 
-    CheckResults();
+    //CheckResults();
+    std::cout << "-------------------------------------------------"
+              << std::endl;
 };
 
 void MatrixMultiplication::MergeData()
 {
     auto start = std::chrono::system_clock::now();
 
-    std::transform(mMatrixC.begin(), mMatrixC.end(), mMatrixD.begin(),
-                    mMatrixC.begin(), std::plus<int>());
+    std::transform(result.mData.begin(), result.mData.end(), helper.mData.begin(),
+                   result.mData.begin(), std::plus<int>());
 
     auto end = std::chrono::system_clock::now();
     auto diff =
@@ -273,41 +311,57 @@ bool MatrixMultiplication::LoadKernel()
     return true;
 }
 
-void MatrixMultiplication::PrepareMatrices()
-{
-    unsigned int size = mMatDims.fstMtxRows * mMatDims.fstMtxCols;
-    mMatrixA = std::move(std::vector<int>(size, 5));
-    size = mMatDims.sndMtxRows * mMatDims.sndMtxCols;
-    mMatrixB = std::move(std::vector<int>(size, 6));
-    size = mMatDims.fstMtxRows * mMatDims.sndMtxCols;
-    mMatrixC = std::move(std::vector<int>(size, 0));
-    mMatrixD = std::move(std::vector<int>(size, 0));
-};
+//std::vector<int> MatrixMultiplication::GenerateMatrix(unsigned int size)
+//{
+//    const int rangeFrom = -100;
+//    const int rangeTo = 100;
+//    std::random_device randDev;
+//    std::mt19937 generator(randDev());
+//    std::uniform_int_distribution<int> distr(rangeFrom, rangeTo);
+//
+//    std::vector<int> data;
+//    data.reserve(size);
+//    for (unsigned int i = 0; i < size; ++i)
+//    {
+//        data.push_back(distr(generator));
+//    }
+//
+//    return data;
+//};
 
-void MatrixMultiplication::CheckResults()
-{
-    unsigned int i, j;
-    float cval, errsq, err;
-    cval = (float)mMatDims.fstMtxCols * 5 * 6;
-    errsq = 0.0f;
+//void MatrixMultiplication::PrepareMatrices()
+//{
+//    unsigned int size = mMatDims.fstMtxRows * mMatDims.fstMtxCols;
+//    mMatrixA = std::move(GenerateMatrix(size)); //std::move(std::vector<int>(size, 5));
+//    size = mMatDims.sndMtxRows * mMatDims.sndMtxCols;
+//    mMatrixB = std::move(GenerateMatrix(size)); // std::move(std::vector<int>(size, 6));
+//    size = mMatDims.fstMtxRows * mMatDims.sndMtxCols;
+//    mMatrixC = std::move(std::vector<int>(size, 0));
+//    mMatrixD = std::move(std::vector<int>(size, 0));
+//};
 
-    for (i = 0; i < mMatDims.fstMtxRows; i++)
-    {
-        for (j = 0; j < mMatDims.sndMtxCols; j++)
-        {
-            err = (mMatrixC[i * mMatDims.sndMtxCols + j])
-                - cval;
-            errsq += err * err;
-        }
-    }
-    if (errsq > 0.001)
-    {
-        std::cout << "Calculation Errors "
-                  << " (" << errsq << ")" << std::endl;
-    }
-    std::cout << "-------------------------------------------------"
-              << std::endl;
-};
+//void MatrixMultiplication::CheckResults()
+//{
+//    unsigned int i, j;
+//    float cval, errsq, err;
+//    cval = (float)mMatDims.fstMtxCols * 5 * 6;
+//    errsq = 0.0f;
+//
+//    for (i = 0; i < mMatDims.fstMtxRows; i++)
+//    {
+//        for (j = 0; j < mMatDims.sndMtxCols; j++)
+//        {
+//            err = (mMatrixC[i * mMatDims.sndMtxCols + j])
+//                - cval;
+//            errsq += err * err;
+//        }
+//    }
+//    if (errsq > 0.001)
+//    {
+//        std::cout << "Calculation Errors "
+//                  << " (" << errsq << ")" << std::endl;
+//    }
+//};
 
 template <> auto cl::sdk::parse<MatricesDimensions>()
 {
@@ -317,7 +371,7 @@ template <> auto cl::sdk::parse<MatricesDimensions>()
            4096, "positive integral"),
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
                                "n", "cols1", "First matrix columns number (default 4096)", false,
-            4096, "positive integral"),
+           4096, "positive integral"),
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
                                "m", "rows1", "First matrix rows number (default 4096)", false,
            4096, "positive integral"));
@@ -353,18 +407,23 @@ int main(int argc, char* argv[])
         std::vector<cl::Platform> platforms;
         cl::Platform::get(&platforms);
 
+        Matrix a(rows1, cols1);
+        a.GenerateData(-100, 100);
+        Matrix b(rows2, cols2);
+        b.GenerateData(-100, 100);
+
         if (!platforms.empty())
         {
-            MatrixMultiplication nVidiaPlatformMul(platforms[0], matDims);
-            nVidiaPlatformMul.Multiply();
+            MatrixMultiplication singlePlatformMul(platforms[0], matDims, a, b);
+            singlePlatformMul.Multiply();
         }
         if (platforms.size() > 1)
         {
 
-            MatrixMultiplication intelPlatformMul(platforms[1], matDims);
-            intelPlatformMul.Multiply();
-            MatrixMultiplication twoPlatformMul(platforms, matDims);
-            twoPlatformMul.Multiply();
+            MatrixMultiplication singlePlatformMul(platforms[1], matDims, a, b);
+            singlePlatformMul.Multiply();
+            MatrixMultiplication multiPlatformMul(platforms, matDims, a, b);
+            multiPlatformMul.Multiply();
         }
 
         char exit;
