@@ -13,6 +13,8 @@
 
 #include <CL/SDK/CLI.hpp>
 
+const unsigned int MAX_DIM = 4096;
+
 struct MatricesDimensions
 {
      unsigned int fstMtxRows;
@@ -50,17 +52,16 @@ struct Matrix
 
 class MatrixMultiplication {
 public:
-     MatrixMultiplication(cl::Platform& platform, MatricesDimensions& matDims,
-                          Matrix& a, Matrix& b);
+    MatrixMultiplication(cl::Platform& platform,
+                         Matrix& a, Matrix& b);
     MatrixMultiplication(std::vector<cl::Platform>& platforms,
-                          MatricesDimensions& matDims, Matrix& a, Matrix& b);
+                         Matrix& a, Matrix& b);
     ~MatrixMultiplication() = default;
 
     void Multiply();
+    void ExportToCSV(const std::string& filename);
 
 private:
-    //void PrepareMatrices();
-    //std::vector<int> GenerateMatrix(unsigned int size);
     void CreateContextsAndCommandQueues();
     void CreatePrograms();
     void MergeData();
@@ -75,7 +76,6 @@ private:
     std::vector<cl::CommandQueue> mCommandQueues;
     std::vector<cl::Platform> mPlatforms;
 
-    MatricesDimensions mMatDims;
     Matrix& A;
     Matrix& B;
     Matrix result;
@@ -83,9 +83,8 @@ private:
 };
 
 MatrixMultiplication::MatrixMultiplication(cl::Platform& platform,
-                                           MatricesDimensions& matDims,
                                            Matrix& a, Matrix& b)
-    : mMatDims(matDims), A(a), B(b), result(Matrix(A.mRows, B.mCols)),
+    : A(a), B(b), result(Matrix(A.mRows, B.mCols)),
       helper(Matrix(0, 0))
 {
     if (!LoadKernel())
@@ -95,13 +94,12 @@ MatrixMultiplication::MatrixMultiplication(cl::Platform& platform,
     mPlatforms.push_back(platform);
     CreateContextsAndCommandQueues();
     CreatePrograms();
-    //PrepareMatrices();
 };
 
 MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
-                                           MatricesDimensions& matDims,
                                            Matrix& a, Matrix& b)
-    : mPlatforms(platforms), mMatDims(matDims), A(a), B(b), result(Matrix(A.mRows, B.mCols)), helper(Matrix(0, 0))
+    : mPlatforms(platforms), A(a), B(b),
+      result(Matrix(A.mRows, B.mCols)), helper(Matrix(0, 0))
 {
     if (!LoadKernel())
     {
@@ -109,7 +107,6 @@ MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
     }
     CreateContextsAndCommandQueues();
     CreatePrograms();
-    //PrepareMatrices();
 };
 
 void MatrixMultiplication::CreateContextsAndCommandQueues()
@@ -136,7 +133,17 @@ void MatrixMultiplication::CreatePrograms()
 {
     for (auto& context : mContexts)
     {
-        mPrograms.emplace_back(cl::Program(context, mKernelSource, true));
+        try
+        {
+            cl::Program program(context, mKernelSource, true);
+            program.build();
+            mPrograms.push_back(program);
+        }
+        catch (cl::BuildError& error)
+        {
+            std::cout << "Build program error " << error.err() << " " << error.what() << std::endl;
+            exit(-1);
+        }
     }
 };
 
@@ -153,7 +160,7 @@ void MatrixMultiplication::Multiply()
                   << std::endl;
         GPUs = 2;
     }
-    if (mMatDims.fstMtxRows == 1 && GPUs > 1)
+    if (A.mRows == 1 && GPUs > 1)
     {
         std::cout
             << "First matrix has only 1 row, nothing to divide on two GPUs"
@@ -164,24 +171,24 @@ void MatrixMultiplication::Multiply()
 
 
     cl::NDRange matrixRange[2];
-    matrixRange[0] = cl::NDRange(mMatDims.fstMtxRows / GPUs, mMatDims.sndMtxCols);
-    matrixRange[1] = cl::NDRange(mMatDims.fstMtxRows / GPUs, mMatDims.sndMtxCols);
-    if (mMatDims.fstMtxRows % GPUs == 1)
+
+    matrixRange[0] = cl::NDRange(A.mRows / GPUs, B.mCols);
+    matrixRange[1] = cl::NDRange(A.mRows / GPUs, B.mCols);
+    if (A.mRows % GPUs == 1)
     {
-        matrixRange[1] =
-            cl::NDRange((mMatDims.fstMtxRows + 1) / GPUs, mMatDims.sndMtxCols);
+        matrixRange[1] = cl::NDRange((A.mRows + 1) / GPUs, B.mCols);
     }
     
     int from[2];
     int to[2];
     from[0] = 0;
-    to[0] = (mMatDims.fstMtxRows * mMatDims.fstMtxCols) / GPUs;
-    if (mMatDims.fstMtxRows % GPUs == 1)
+    to[0] = (A.mRows * A.mCols) / GPUs;
+    if (A.mRows % GPUs == 1)
     {
-        to[0] = ((mMatDims.fstMtxRows - 1) * mMatDims.fstMtxCols) / GPUs;
+        to[0] = ((A.mRows - 1) * A.mCols) / GPUs;
     }
     from[1] = to[0];
-    to[1] = mMatDims.fstMtxRows * mMatDims.fstMtxCols;
+    to[1] = A.mRows * A.mCols;
 
     for (int gpu = 0; gpu < GPUs; ++gpu)
     {
@@ -198,61 +205,31 @@ void MatrixMultiplication::Multiply()
                                   A.mData.begin() + stop, true);
             cl::Buffer bMatBuffer(mContexts[gpu], B.mData.begin(),
                                   B.mData.end(), true);
-            cl::Buffer resultMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY,
-                                       mMatDims.fstMtxRows * mMatDims.sndMtxCols * sizeof(int));
-            try
-            {
-                kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange[gpu]),
-                           mMatDims.fstMtxRows, mMatDims.fstMtxCols,
-                           mMatDims.sndMtxCols, gpu, aMatBuffer, bMatBuffer,
-                           resultMatBuffer);
-            } catch (cl::Error err)
-            {
-                std::cout << "Error 1: " << (int)err.err() << " " << err.what()
-                          << std::endl;
-                exit(-1);
-            }
-            try
-            {
-                mCommandQueues[gpu].finish();
-            } catch (cl::Error err)
-            {
-                std::cout << "Error 2: " << (int)err.err() << " " << err.what()
-                          << std::endl;
-                exit(-1);
-            }
             
+            auto size = A.mRows * B.mCols * sizeof(int);
+            cl::Buffer resultMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY, size);
+            mCommandQueues[gpu].enqueueFillBuffer(resultMatBuffer, 0, 0, size, nullptr);
 
+            kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange[gpu]),
+                       A.mRows, A.mCols, B.mCols, gpu, aMatBuffer, bMatBuffer, resultMatBuffer);
+            
+            mCommandQueues[gpu].finish();
+            
+            if (gpu == 0)
+            {
+                cl::copy(mCommandQueues[gpu], resultMatBuffer,
+                         result.mData.begin(), result.mData.end());
+            }
+            else if (gpu == 1)
+            {
+                helper = std::move(Matrix(result.mRows, result.mCols));
 
-            if (gpu == 0) try
-                {
-                    cl::copy(mCommandQueues[gpu], resultMatBuffer,
-                             result.mData.begin(),
-                             result.mData.end());
-                } catch (cl::Error err)
-                {
-                    std::cout << "Error 3: " << (int)err.err() << " "
-                              << err.what() << std::endl;
-                    exit(-1);
-                }
+                cl::copy(mCommandQueues[gpu], resultMatBuffer,
+                            helper.mData.begin(),
+                            helper.mData.end());
+            }
 
-            else
-                try
-                {
-                    helper = std::move(Matrix(result.mRows, result.mCols));
-
-                    cl::copy(mCommandQueues[gpu], resultMatBuffer,
-                             helper.mData.begin(),
-                             helper.mData.end());
-                } catch (cl::Error err)
-                {
-                    std::cout << "Error 4: " << (int)err.err() << " "
-                              << err.what() << std::endl;
-                    exit(-1);
-                }
-
-
-            std::lock_guard<std::mutex> lk(m);
+            std::lock_guard<std::mutex> lock(m);
             threads--;
             cv.notify_all();
         });
@@ -296,49 +273,72 @@ void MatrixMultiplication::MergeData()
 
 bool MatrixMultiplication::LoadKernel()
 {
-    //std::string fileName("C:\\RND200\\OpenCL-SDK\\samples\\core\\mulmatrix\\mulMatrix.cl");
-    std::string fileName("mulMatrix.cl");
+    std::string fileName("C:\\RND200\\OpenCL-SDK\\samples\\core\\mulmatrix\\mulMatrix.cl");
+    //std::string fileName("mulMatrix.cl");
     std::ifstream stream(fileName.c_str());
     if (!stream.is_open())
     {
-        std::cout << "Cannot open file: " << fileName << std::endl;
-        return false;
+        fileName = ("mulMatrix.cl");
+        //std::cout << "Cannot open file: " << fileName << std::endl;
+        //return false;
     }
     mKernelSource =
         std::move(std::string(std::istreambuf_iterator<char>(stream),
                               (std::istreambuf_iterator<char>())));
 
     return true;
-}
+};
 
-//std::vector<int> MatrixMultiplication::GenerateMatrix(unsigned int size)
-//{
-//    const int rangeFrom = -100;
-//    const int rangeTo = 100;
-//    std::random_device randDev;
-//    std::mt19937 generator(randDev());
-//    std::uniform_int_distribution<int> distr(rangeFrom, rangeTo);
-//
-//    std::vector<int> data;
-//    data.reserve(size);
-//    for (unsigned int i = 0; i < size; ++i)
-//    {
-//        data.push_back(distr(generator));
-//    }
-//
-//    return data;
-//};
+void MatrixMultiplication::ExportToCSV(const std::string& filename)
+{
+    std::ofstream resultFile;
+    resultFile.open(filename, std::ios::out | std::ios::trunc);
+    if (resultFile.is_open())
+    {
+        std::cout << "Exporting results to CSV file " << filename << std::endl;
+        std::cout << "-------------------------------------------------"
+                  << std::endl << std::endl;
 
-//void MatrixMultiplication::PrepareMatrices()
-//{
-//    unsigned int size = mMatDims.fstMtxRows * mMatDims.fstMtxCols;
-//    mMatrixA = std::move(GenerateMatrix(size)); //std::move(std::vector<int>(size, 5));
-//    size = mMatDims.sndMtxRows * mMatDims.sndMtxCols;
-//    mMatrixB = std::move(GenerateMatrix(size)); // std::move(std::vector<int>(size, 6));
-//    size = mMatDims.fstMtxRows * mMatDims.sndMtxCols;
-//    mMatrixC = std::move(std::vector<int>(size, 0));
-//    mMatrixD = std::move(std::vector<int>(size, 0));
-//};
+        resultFile << "Matrix A [" << A.mRows << " x " << A.mCols << "]\n\n ";
+
+        auto rows = A.mRows;
+        auto cols = A.mCols;
+        for (unsigned int r = 0; r < rows; ++r)
+        {
+            for (unsigned int c = 0; c < cols; ++c)
+            {
+                resultFile << A.mData[r * cols + c] << ",";
+            }
+            resultFile << "\n";
+        }
+
+        resultFile << "\nMatrix B [" << B.mRows << " x " << B.mCols << "]\n\n";
+        rows = B.mRows;
+        cols = B.mCols;
+        for (unsigned int r = 0; r < rows; ++r)
+        {
+            for (unsigned int c = 0; c < cols; ++c)
+            {
+                resultFile << B.mData[r * cols + c] << ",";
+            }
+            resultFile << "\n";
+        }
+
+        resultFile << "\nMultiplication of matrices A x B [" << result.mRows << " x " << result.mCols << "]\n\n";
+        rows = result.mRows;
+        cols = result.mCols;
+        for (unsigned int r = 0; r < rows; ++r)
+        {
+            for (unsigned int c = 0; c < cols; ++c)
+            {
+                resultFile << result.mData[r * cols + c] << ",";
+            }
+            resultFile << "\n";
+        }
+        resultFile.close();
+    }
+};
+
 
 //void MatrixMultiplication::CheckResults()
 //{
@@ -367,25 +367,46 @@ template <> auto cl::sdk::parse<MatricesDimensions>()
 {
     return std::make_tuple(
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
-                               "p", "cols2", "Second matrix columns number (default 4096)", false,
-           4096, "positive integral"),
+                               "p", "cols2", "Second matrix columns number (maximum 4096 default 4096)", false,
+            MAX_DIM, "positive integral"),
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
-                               "n", "cols1", "First matrix columns number (default 4096)", false,
-           4096, "positive integral"),
+                               "n", "cols1", "First matrix columns number (maximum 4096 default 4096)", false,
+            MAX_DIM, "positive integral"),
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
-                               "m", "rows1", "First matrix rows number (default 4096)", false,
-           4096, "positive integral"));
+                               "m", "rows1", "First matrix rows number (maximum 4096 default 4096)", false,
+            MAX_DIM, "positive integral"));
 }
 template <>
 MatricesDimensions cl::sdk::comprehend<MatricesDimensions>(
     std::shared_ptr<TCLAP::ValueArg<unsigned int>> sndMtxCols ,
-    std::shared_ptr<TCLAP::ValueArg<unsigned int>> fstMtxCols,//2nd matrix rows must be the same as fst matrix column
+    std::shared_ptr<TCLAP::ValueArg<unsigned int>> fstMtxCols,//second matrix rows number must be equal to first matrix column number
     std::shared_ptr<TCLAP::ValueArg<unsigned int>> fstMtxRows)
 {
-    return MatricesDimensions{fstMtxRows->getValue(),
-                          fstMtxCols->getValue(),
-                          fstMtxCols->getValue(),//2nd matrix rows must be the same as fst matrix column
-                          sndMtxCols->getValue() };
+    auto rows1 = fstMtxRows->getValue();
+    auto cols1 = fstMtxCols->getValue();
+    auto cols2 = sndMtxCols->getValue();
+
+    if (rows1 > MAX_DIM)
+    {
+        std::cout << rows1 << " is greater than maximum value. " << MAX_DIM << " will be used." << std::endl;
+        rows1 = MAX_DIM;
+    }
+    if (cols1 > MAX_DIM)
+    {
+        std::cout << cols1 << " is greater than maximum value. " << MAX_DIM << " will be used." << std::endl;
+        cols1 = MAX_DIM;
+    }
+    if (cols2 > MAX_DIM)
+    {
+        std::cout << cols2 << " is greater than maximum value. " << MAX_DIM << " will be used." << std::endl;
+        cols2 = MAX_DIM;
+    }
+
+    return MatricesDimensions{
+        rows1,
+        cols1,
+        cols1, // second matrix rows number must be equal to first matrix column number
+        cols2 };
 }
 
 int main(int argc, char* argv[])
@@ -397,6 +418,7 @@ int main(int argc, char* argv[])
     unsigned int cols1 = matDims.fstMtxCols;
     unsigned int rows2 = matDims.sndMtxRows;
     unsigned int cols2 = matDims.sndMtxCols;
+
     std::cout << "Matrices given for multiplication: A[" << rows1 << "x" << cols1 << "] x B["
               << rows2 << "x" << cols2 << "]" << std::endl;
     std::cout << "-------------------------------------------------"
@@ -408,22 +430,25 @@ int main(int argc, char* argv[])
         cl::Platform::get(&platforms);
 
         Matrix a(rows1, cols1);
-        a.GenerateData(-100, 100);
+        a.GenerateData(-10, 10);
         Matrix b(rows2, cols2);
-        b.GenerateData(-100, 100);
+        b.GenerateData(-10, 10);
 
         if (!platforms.empty())
         {
-            MatrixMultiplication singlePlatformMul(platforms[0], matDims, a, b);
+            MatrixMultiplication singlePlatformMul(platforms[0], a, b);
             singlePlatformMul.Multiply();
+            singlePlatformMul.ExportToCSV("mulmatrix_first_platform.csv");
         }
         if (platforms.size() > 1)
         {
 
-            MatrixMultiplication singlePlatformMul(platforms[1], matDims, a, b);
+            MatrixMultiplication singlePlatformMul(platforms[1], a, b);
             singlePlatformMul.Multiply();
-            MatrixMultiplication multiPlatformMul(platforms, matDims, a, b);
+            singlePlatformMul.ExportToCSV("mulmatrix_second_platform.csv");
+            MatrixMultiplication multiPlatformMul(platforms, a, b);
             multiPlatformMul.Multiply();
+            multiPlatformMul.ExportToCSV("mulmatrix_two_platforms.csv");
         }
 
         char exit;
