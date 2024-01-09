@@ -14,13 +14,17 @@
 #include <CL/SDK/CLI.hpp>
 
 const unsigned int MAX_DIM = 4096;
+const int FROM = -100;
+const int TO = 100;
 
-struct MatricesDimensions
+struct SampleOptions
 {
      unsigned int fstMtxRows;
      unsigned int fstMtxCols;
      unsigned int sndMtxRows;
      unsigned int sndMtxCols;
+     int from;
+     int to;
  };
 
 struct Matrix
@@ -30,11 +34,23 @@ struct Matrix
      std::vector<int> mData;
 
      Matrix(int rows, int cols)
-         : mRows(rows), mCols(cols), mData(std::vector<int>(mRows*mCols,0))
+         : mRows(rows), mCols(cols),
+           mData(std::vector<int>(mRows*mCols,0))
      {
      };
-     void GenerateData(int from, int to)
+     Matrix(int rows, int cols, int from, int to)
+         : mRows(rows), mCols(cols),
+           mData(GenerateData(from, to))
      {
+     };
+     std::vector<int> GenerateData(int from, int to)
+     {
+         if (from >= to)
+         {
+             std::cout << "Passed range <" << from << "," << to
+                       << "> to generate matrix data is invalid.";
+             exit(-1);
+         }
          std::random_device randDev;
          std::mt19937 generator(randDev());
          std::uniform_int_distribution<int> distr(from, to);
@@ -46,7 +62,7 @@ struct Matrix
          {
              data.push_back(distr(generator));
          }
-         mData = std::move(data);
+         return data;
      };
 };
 
@@ -363,21 +379,29 @@ void MatrixMultiplication::ExportToCSV(const std::string& filename)
 //    }
 //};
 
-template <> auto cl::sdk::parse<MatricesDimensions>()
+template <> auto cl::sdk::parse<SampleOptions>()
 {
     return std::make_tuple(
+        std::make_shared<TCLAP::ValueArg<int>>(
+            "t", "to",
+            "Upper range to generate matrix data (maximum 100 default 100)", false, TO, "integral"),
+        std::make_shared<TCLAP::ValueArg<int>>(
+            "f", "from",
+            "Bottom range to generate matrix data (minimum -100 default -100)", false, FROM, "integral"),
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
-                               "p", "cols2", "Second matrix columns number (maximum 4096 default 4096)", false,
+            "p", "cols2", "Second matrix columns number (maximum 4096 default 4096)", false,
             MAX_DIM, "positive integral"),
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
-                               "n", "cols1", "First matrix columns number (maximum 4096 default 4096)", false,
+            "n", "cols1", "First matrix columns number (maximum 4096 default 4096)", false,
             MAX_DIM, "positive integral"),
         std::make_shared<TCLAP::ValueArg<unsigned int>>(
-                               "m", "rows1", "First matrix rows number (maximum 4096 default 4096)", false,
+            "m", "rows1", "First matrix rows number (maximum 4096 default 4096)", false,
             MAX_DIM, "positive integral"));
 }
 template <>
-MatricesDimensions cl::sdk::comprehend<MatricesDimensions>(
+SampleOptions cl::sdk::comprehend<SampleOptions>(
+    std::shared_ptr<TCLAP::ValueArg<int>> to,
+    std::shared_ptr<TCLAP::ValueArg<int>> from,
     std::shared_ptr<TCLAP::ValueArg<unsigned int>> sndMtxCols ,
     std::shared_ptr<TCLAP::ValueArg<unsigned int>> fstMtxCols,//second matrix rows number must be equal to first matrix column number
     std::shared_ptr<TCLAP::ValueArg<unsigned int>> fstMtxRows)
@@ -402,22 +426,41 @@ MatricesDimensions cl::sdk::comprehend<MatricesDimensions>(
         cols2 = MAX_DIM;
     }
 
-    return MatricesDimensions{
+    auto bottom = from->getValue();
+    auto upper = to->getValue();
+    if (bottom < FROM)
+    {
+        std::cout << bottom << " is smaller than minimum value. " << FROM
+                  << " will be used." << std::endl;
+        bottom = FROM;
+    }
+    if (upper > TO)
+    {
+        std::cout << upper << " is greater than maximum value. " << TO
+                  << " will be used." << std::endl;
+        upper = TO;
+    }
+
+    return SampleOptions{
         rows1,
         cols1,
         cols1, // second matrix rows number must be equal to first matrix column number
-        cols2 };
+        cols2,
+        bottom,
+        upper};
 }
 
 int main(int argc, char* argv[])
 {
-    auto opts = cl::sdk::parse_cli<MatricesDimensions>(argc, argv, "OpenCL SDK Matrices multiplication example");
-    MatricesDimensions matDims = std::get<0>(opts);
+    auto cmdline = cl::sdk::parse_cli<SampleOptions>(
+        argc, argv, "OpenCL SDK Matrices multiplication example");
+
+    SampleOptions options = std::get<0>(cmdline);
     
-    unsigned int rows1 = matDims.fstMtxRows;
-    unsigned int cols1 = matDims.fstMtxCols;
-    unsigned int rows2 = matDims.sndMtxRows;
-    unsigned int cols2 = matDims.sndMtxCols;
+    unsigned int rows1 = options.fstMtxRows;
+    unsigned int cols1 = options.fstMtxCols;
+    unsigned int rows2 = options.sndMtxRows;
+    unsigned int cols2 = options.sndMtxCols;
 
     std::cout << "Matrices given for multiplication: A[" << rows1 << "x" << cols1 << "] x B["
               << rows2 << "x" << cols2 << "]" << std::endl;
@@ -429,10 +472,8 @@ int main(int argc, char* argv[])
         std::vector<cl::Platform> platforms;
         cl::Platform::get(&platforms);
 
-        Matrix a(rows1, cols1);
-        a.GenerateData(-10, 10);
-        Matrix b(rows2, cols2);
-        b.GenerateData(-10, 10);
+        Matrix a(rows1, cols1, options.from, options.to);
+        Matrix b(rows2, cols2, options.from, options.to);
 
         if (!platforms.empty())
         {
