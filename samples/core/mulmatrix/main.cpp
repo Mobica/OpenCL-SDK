@@ -16,6 +16,7 @@
 const unsigned int MAX_DIM = 4096;
 const int FROM = -100;
 const int TO = 100;
+const std::string kernelName("mulMatrix");
 
 struct SampleOptions
 {
@@ -62,6 +63,7 @@ struct Matrix
          {
              data.push_back(distr(generator));
          }
+         std::cout << "Matrix random data generated" << std::endl;
          return data;
      };
 };
@@ -80,6 +82,7 @@ public:
 private:
     void CreateContextsAndCommandQueues();
     void CreatePrograms();
+    void CreateKernels();
     void MergeData();
     //void CheckResults();
 
@@ -91,6 +94,7 @@ private:
     std::vector<cl::Context> mContexts;
     std::vector<cl::CommandQueue> mCommandQueues;
     std::vector<cl::Platform> mPlatforms;
+    std::vector<cl::Kernel> mKernels;
 
     Matrix& A;
     Matrix& B;
@@ -110,6 +114,7 @@ MatrixMultiplication::MatrixMultiplication(cl::Platform& platform,
     mPlatforms.push_back(platform);
     CreateContextsAndCommandQueues();
     CreatePrograms();
+    CreateKernels();
 };
 
 MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
@@ -123,6 +128,7 @@ MatrixMultiplication::MatrixMultiplication(std::vector<cl::Platform>& platforms,
     }
     CreateContextsAndCommandQueues();
     CreatePrograms();
+    CreateKernels();
 };
 
 void MatrixMultiplication::CreateContextsAndCommandQueues()
@@ -138,6 +144,7 @@ void MatrixMultiplication::CreateContextsAndCommandQueues()
         if (platformDevices.size() > 0)
         {
             cl::Context context(platformDevices);
+
             mContexts.emplace_back(context);
             mCommandQueues.emplace_back(
                 cl::CommandQueue(context, platformDevices[0]));
@@ -158,6 +165,24 @@ void MatrixMultiplication::CreatePrograms()
         catch (cl::BuildError& error)
         {
             std::cout << "Build program error " << error.err() << " " << error.what() << std::endl;
+            exit(-1);
+        }
+    }
+};
+
+void MatrixMultiplication::CreateKernels()
+{
+    for (auto& program : mPrograms)
+    {
+        try
+        {
+            cl::Kernel kernel(program, kernelName.c_str());
+            mKernels.push_back(kernel);
+        }
+        catch (cl::Error& error)
+        {
+            std::cout << "Create kernel error " << error.err() << " "
+                      << error.what() << std::endl;
             exit(-1);
         }
     }
@@ -214,9 +239,6 @@ void MatrixMultiplication::Multiply()
         threads++;
         std::thread work([&, gpu, start, stop]() 
         {
-            cl::KernelFunctor<int, int, int, int, cl::Buffer, cl::Buffer, cl::Buffer>
-                kernelFunc(mPrograms[gpu], "mulMatrix");
-
             cl::Buffer aMatBuffer(mContexts[gpu], A.mData.begin() + start,
                                   A.mData.begin() + stop, true);
             cl::Buffer bMatBuffer(mContexts[gpu], B.mData.begin(),
@@ -224,11 +246,16 @@ void MatrixMultiplication::Multiply()
             
             auto size = A.mRows * B.mCols * sizeof(int);
             cl::Buffer resultMatBuffer(mContexts[gpu], CL_MEM_WRITE_ONLY, size);
+
             mCommandQueues[gpu].enqueueFillBuffer(resultMatBuffer, 0, 0, size, nullptr);
+
+            cl::KernelFunctor<int, int, int, int, cl::Buffer, cl::Buffer,
+                              cl::Buffer>
+                kernelFunc(mKernels[gpu]);
 
             kernelFunc(cl::EnqueueArgs(mCommandQueues[gpu], matrixRange[gpu]),
                        A.mRows, A.mCols, B.mCols, gpu, aMatBuffer, bMatBuffer, resultMatBuffer);
-            
+
             mCommandQueues[gpu].finish();
             
             if (gpu == 0)
@@ -295,6 +322,7 @@ bool MatrixMultiplication::LoadKernel()
     if (!stream.is_open())
     {
         fileName = ("mulMatrix.cl");
+        stream = std::ifstream(fileName.c_str());
         //std::cout << "Cannot open file: " << fileName << std::endl;
         //return false;
     }
@@ -312,8 +340,8 @@ void MatrixMultiplication::ExportToCSV(const std::string& filename)
     if (resultFile.is_open())
     {
         std::cout << "Exporting results to CSV file " << filename << std::endl;
-        std::cout << "-------------------------------------------------"
-                  << std::endl << std::endl;
+        //std::cout << "-------------------------------------------------"
+        //          << std::endl << std::endl;
 
         resultFile << "Matrix A [" << A.mRows << " x " << A.mCols << "]\n\n ";
 
@@ -352,6 +380,9 @@ void MatrixMultiplication::ExportToCSV(const std::string& filename)
             resultFile << "\n";
         }
         resultFile.close();
+        std::cout << "-------------------------------------------------"
+                  << std::endl
+                  << std::endl;
     }
 };
 
@@ -467,39 +498,33 @@ int main(int argc, char* argv[])
     std::cout << "-------------------------------------------------"
               << std::endl;
 
-    try
+
+    std::vector<cl::Platform> platforms;
+    cl::Platform::get(&platforms);
+
+    Matrix a(rows1, cols1, options.from, options.to);
+    Matrix b(rows2, cols2, options.from, options.to);
+
+    if (!platforms.empty())
     {
-        std::vector<cl::Platform> platforms;
-        cl::Platform::get(&platforms);
-
-        Matrix a(rows1, cols1, options.from, options.to);
-        Matrix b(rows2, cols2, options.from, options.to);
-
-        if (!platforms.empty())
-        {
-            MatrixMultiplication singlePlatformMul(platforms[0], a, b);
-            singlePlatformMul.Multiply();
-            singlePlatformMul.ExportToCSV("mulmatrix_first_platform.csv");
-        }
-        if (platforms.size() > 1)
-        {
-
-            MatrixMultiplication singlePlatformMul(platforms[1], a, b);
-            singlePlatformMul.Multiply();
-            singlePlatformMul.ExportToCSV("mulmatrix_second_platform.csv");
-            MatrixMultiplication multiPlatformMul(platforms, a, b);
-            multiPlatformMul.Multiply();
-            multiPlatformMul.ExportToCSV("mulmatrix_two_platforms.csv");
-        }
-
-        char exit;
-        std::cout << "Type any letter and press enter to exit." << std::endl;
-        std::cin >> exit;
-    } catch (cl::Error err)
-    {
-        std::cout << "Error: " << err.what() << std::endl;
-        exit(-1);
+        MatrixMultiplication singlePlatformMul(platforms[0], a, b);
+        singlePlatformMul.Multiply();
+        singlePlatformMul.ExportToCSV("mulmatrix_first_platform.csv");
     }
+    if (platforms.size() > 1)
+    {
+
+        MatrixMultiplication singlePlatformMul(platforms[1], a, b);
+        singlePlatformMul.Multiply();
+        singlePlatformMul.ExportToCSV("mulmatrix_second_platform.csv");
+        MatrixMultiplication multiPlatformMul(platforms, a, b);
+        multiPlatformMul.Multiply();
+        multiPlatformMul.ExportToCSV("mulmatrix_two_platforms.csv");
+    }
+
+    char exit;
+    std::cout << "Type any letter and press enter to exit." << std::endl;
+    std::cin >> exit;
 
     return 0;
 }
