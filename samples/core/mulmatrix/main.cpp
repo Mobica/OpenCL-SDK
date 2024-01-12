@@ -13,7 +13,8 @@
 
 #include <CL/SDK/CLI.hpp>
 
-const unsigned int MAX_DIM = 4096;
+const unsigned int MAX_DIM = 128;
+//4096;
 const int FROM = -100;
 const int TO = 100;
 const std::string kernelName("mulMatrix");
@@ -135,10 +136,6 @@ void MatrixMultiplication::CreateContextsAndCommandQueues()
 {
     for (auto& platform : mPlatforms)
     {
-        std::string name;
-        platform.getInfo(CL_PLATFORM_NAME, &name);
-        std::cout << "Platform: " << name << std::endl;
-
         std::vector<cl::Device> platformDevices;
         platform.getDevices(CL_DEVICE_TYPE_GPU, &platformDevices);//CL_DEVICE_TYPE_ALL
         if (platformDevices.size() > 0)
@@ -208,8 +205,8 @@ void MatrixMultiplication::Multiply()
             << std::endl;
         GPUs = 1;
     }
-    auto start = std::chrono::system_clock::now();
 
+    auto start = std::chrono::system_clock::now();
 
     cl::NDRange matrixRange[2];
 
@@ -219,7 +216,7 @@ void MatrixMultiplication::Multiply()
     {
         matrixRange[1] = cl::NDRange((A.mRows + 1) / GPUs, B.mCols);
     }
-    
+
     int from[2];
     int to[2];
     from[0] = 0;
@@ -233,6 +230,10 @@ void MatrixMultiplication::Multiply()
 
     for (int gpu = 0; gpu < GPUs; ++gpu)
     {
+        std::string name;
+        mPlatforms[gpu].getInfo(CL_PLATFORM_NAME, &name);
+        std::cout << "Calculation on platform: " << name << std::endl;
+
         auto start = from[gpu];
         auto stop = to[gpu];
 
@@ -257,7 +258,7 @@ void MatrixMultiplication::Multiply()
                        A.mRows, A.mCols, B.mCols, gpu, aMatBuffer, bMatBuffer, resultMatBuffer);
 
             mCommandQueues[gpu].finish();
-            
+
             if (gpu == 0)
             {
                 cl::copy(mCommandQueues[gpu], resultMatBuffer,
