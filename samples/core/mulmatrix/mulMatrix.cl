@@ -12,13 +12,11 @@ kernel void mulMatrix(
     unsigned int element = get_global_id(0);
     unsigned int i = element + M/2 * gpu;
     unsigned int j = get_global_id(1);
-    int tmp;
+    int tmp = 0;
+
+    for(k;k<N;k++)
     {
-        tmp = 0;
-        for(k;k<N;k++)
-        {
-			tmp += A[element*N + k] * B[k*P + j];
-        }
-        C[i*P+j] = tmp;
+	    tmp += A[element*N + k] * B[k*P + j];
     }
+    C[i*P+j] = tmp;
 }
