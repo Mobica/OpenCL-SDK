@@ -60,11 +60,11 @@ all
 // set to 0/1
 #define TEX_1D_PATH 0
 // set to 0/1
-#define TEX_1D_ARRAY_PATH 1
+#define TEX_1D_ARRAY_PATH 0
 // set to 1-[num array layers]
 #define TEX_ARRAY_LAYERS 1
 // set to 1-[3d texture depth]
-#define TEX_3D_LAYERS 1
+#define TEX_3D_LAYERS 16
 #define TEX_LAYERS (TEX_ARRAY_LAYERS * TEX_3D_LAYERS)
 #define LAYERS_UNIFORM                                                         \
     ((TEX_ARRAY_LAYERS * TEX_3D_LAYERS > 1) || TEX_1D_PATH > 0                 \
@@ -1750,12 +1750,12 @@ private:
         VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkPipelineStageFlags destinationStage =
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-            | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+            /*| VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR*/; // due to validation layer error
 
         if (src == VK_ACCESS_SHADER_READ_BIT)
         {
             sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+                /*| VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR*/;// due to validation layer error
             destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         }
 
@@ -2538,6 +2538,14 @@ private:
         uint32_t extensionCount;
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount,
                                              nullptr);
+
+
+
+        if (std::string(pProperties.deviceName).find("Intel")
+            != std::string::npos)
+            return false;
+
+
 
         std::vector<VkExtensionProperties> availableExtensions(extensionCount);
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount,
