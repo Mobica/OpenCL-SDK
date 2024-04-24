@@ -1,4 +1,4 @@
-# Copyright (c) 2020-2022 Ben Ashbaugh
+# Copyright (c) 2021-2022 Ben Ashbaugh
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -18,20 +18,12 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-find_package(Vulkan)
-find_package(glfw3 HINTS "../../external")
-
-set(BUILD_VULKAN_SAMPLES TRUE)
-if(NOT VULKAN_FOUND)
-    message(STATUS "Skipping Vulkan Samples - Vulkan is not found.")
-    set(BUILD_VULKAN_SAMPLES FALSE)
-endif()
-if(NOT glfw3_FOUND)
-    message(STATUS "Skipping Vulkan Samples - GLFW is not found.")
-    set(BUILD_VULKAN_SAMPLES FALSE)
-endif()
-
-if(BUILD_VULKAN_SAMPLES)
-    add_subdirectory( ocean )
-    add_subdirectory( 00_juliavk )
-endif()
+add_sample(
+    NUMBER 00
+    TARGET juliavk
+    VERSION 300 # clCreateImageWithProperties
+    CATEGORY vulkan
+    SOURCES main.cpp
+    KERNELS juliavk.vert.spv juliavk.frag.spv juliavk_array.frag.spv juliavk_3d.frag.spv juliavk_1d_array.frag.spv juliavk_1d.frag.spv
+    INCLUDES ${Vulkan_INCLUDE_DIR}
+    LIBS ${Vulkan_LIBRARY} glfw)
