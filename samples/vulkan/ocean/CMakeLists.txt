@@ -24,6 +24,6 @@ add_sample(
     VERSION 300 # clCreateImageWithProperties
     CATEGORY vulkan
     SOURCES main.cpp
-    KERNELS ocean.vert.spv ocean.frag.spv ocean_2D_array.frag.spv ocean_3d.frag.spv
+    KERNELS ocean.vert.spv ocean.frag.spv
     INCLUDES ${Vulkan_INCLUDE_DIR}
     LIBS ${Vulkan_LIBRARY} glfw glm::glm)

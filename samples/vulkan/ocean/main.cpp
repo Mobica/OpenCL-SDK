@@ -57,7 +57,6 @@ all
 
 #include <math.h>
 
-
 // GLM includes
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -70,9 +69,14 @@ all
 #define WX 1.f
 #define WY 1.f
 
+#define DRAG_SPEED_FAC 0.05f
+
+
+namespace {
+
 std::int32_t current_array_layer = 0;
 
-static const char kernelString[] =
+const char kernelString[] =
 
 R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci ))
 {
@@ -224,7 +228,20 @@ struct Vertex {
     }
 };
 
-class JuliaVKApplication {
+struct Camera
+{
+    glm::vec3 eye = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::vec3 dir = glm::vec3(0.0f, 0.0f, -1.0f);
+    glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::vec3 rvec = glm::vec3(1.0f, 0.0f, 0.0f);
+    glm::vec2 begin = glm::vec2(-1.0f, -1.0f);
+    float yaw = -90.0f;
+    float pitch = 0.0f;
+    bool drag = false;
+};
+
+class OceanApplication {
+
 public:
     void run(int argc, char** argv)
     {
@@ -240,6 +257,8 @@ public:
 
 private:
     GLFWwindow* window;
+
+    Camera camera;
 
     bool animate = false;
     bool redraw = false;
@@ -289,21 +308,36 @@ private:
     bool linearImages = false;
     bool deviceLocalImages = true;
 
+    // Only last stage image must be shared between OCL and vulkan
+    // those images will hold displacements and normals.
 
-    // only last stage image must be shared between OCL and vulkan
-    // this texture will hold displacements. Quite possible I will need
-    // one more texture for normal map!
-    std::vector<VkImage> images;
-    std::vector<VkDeviceMemory> imageMemories;
-    std::vector<VkImageView> imageViews;
+    enum InteropTexType
+    {
+        IOPT_DISPLACEMENT = 0,
+        IOPT_NORMAL_MAP,
+        IOPT_COUNT
+    };
 
+    struct TextureOCL
+    {
+        std::vector<VkImage> images;
+        std::vector<VkDeviceMemory> imageMemories;
+        std::vector<VkImageView> imageViews;
+    };
+
+    // 0 - displacement map, 1 - normal map
+    std::array<TextureOCL, IOPT_COUNT> textureImages;
 
     // Ocean grid vertices and related buffers
     std::vector<Vertex> verts;
     std::vector<VkBuffer> vertexBuffers;
     std::vector<VkDeviceMemory> vertexBufferMemories;
 
-    VkSampler textureSampler;
+    std::vector <std::uint16_t> inds;
+    std::vector<VkBuffer> indexBuffers;
+    std::vector<VkDeviceMemory> indexBufferMemories;
+
+    std::array<VkSampler, IOPT_COUNT> textureSampler;
 
     VkDescriptorPool descriptorPool;
     std::vector<VkDescriptorSet> descriptorSets;
@@ -344,22 +378,17 @@ private:
     cl::CommandQueue commandQueue;
     cl::Kernel kernel;
 
-    //
-    cl::Image h0pk;
-    cl::Image h0mk;
-    cl::Image hkt_ping_pong[2];
-    cl::Image phase_pingpong[2];
+    // IFFT intermediate computation storages
+    std::unique_ptr<cl::Image> h0pk;
+    std::unique_ptr<cl::Image> h0mk;
+    std::unique_ptr<cl::Image> hkt_ping_pong[2];
+    std::unique_ptr<cl::Image> phase_pingpong[2];
 
-
-#if 1
-    size_t ocl_max_img2d_width,
-           ocl_max_img1d_width,
-           ocl_max_array_size;
+    size_t ocl_max_img2d_width;
     cl_ulong ocl_max_alloc_size, ocl_mem_size;
-#endif
 
-    // final computation result with displacements, needs to follow swap-chain scheme
-    std::vector<std::unique_ptr<cl::Image>> mems;
+    // final computation result with displacements and normal map, needs to follow swap-chain scheme
+    std::array<std::vector<std::unique_ptr<cl::Image>>, IOPT_COUNT> mems;
     std::vector<cl::Semaphore> signalSemaphores;
 
     clEnqueueAcquireExternalMemObjectsKHR_fn
@@ -506,18 +535,13 @@ private:
             }
         }
 
-#if 1
         int error = CL_SUCCESS;
         error |= clGetDeviceInfo( devices[deviceIndex](), CL_DEVICE_IMAGE2D_MAX_WIDTH, sizeof( ocl_max_img2d_width ), &ocl_max_img2d_width, NULL );
-        error |= clGetDeviceInfo( devices[deviceIndex](), CL_DEVICE_IMAGE_MAX_BUFFER_SIZE, sizeof( ocl_max_img1d_width ), &ocl_max_img1d_width, NULL );
-        error |= clGetDeviceInfo( devices[deviceIndex](), CL_DEVICE_IMAGE_MAX_ARRAY_SIZE, sizeof( ocl_max_array_size ), &ocl_max_array_size, NULL );
         error |= clGetDeviceInfo( devices[deviceIndex](), CL_DEVICE_MAX_MEM_ALLOC_SIZE, sizeof( ocl_max_alloc_size ), &ocl_max_alloc_size, NULL );
         error |= clGetDeviceInfo( devices[deviceIndex](), CL_DEVICE_GLOBAL_MEM_SIZE, sizeof( ocl_mem_size ), &ocl_mem_size, NULL );
 
         if (error!=CL_SUCCESS)
             printf("clGetDeviceInfo error: %d\n", error);
-
-#endif
 
         context = cl::Context{ devices[deviceIndex] };
         commandQueue = cl::CommandQueue{ context, devices[deviceIndex] };
@@ -540,61 +564,73 @@ private:
 
     void initOpenCLMems()
     {
-        mems.resize(swapChainImages.size());
-
-        for (size_t i = 0; i < swapChainImages.size(); i++)
+        for (size_t target = 0; target < IOPT_COUNT; target++)
         {
-            if (useExternalMemory)
+            mems[target].resize(swapChainImages.size());
+
+            for (size_t img_num = 0; img_num < textureImages.size(); img_num++)
             {
+                for (size_t i = 0; i < swapChainImages.size(); i++)
+                {
+                    if (useExternalMemory)
+                    {
 #ifdef _WIN32
-                HANDLE handle = NULL;
-                VkMemoryGetWin32HandleInfoKHR getWin32HandleInfo{};
-                getWin32HandleInfo.sType =
-                    VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
-                getWin32HandleInfo.memory = textureImageMemories[i];
-                getWin32HandleInfo.handleType =
-                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-                vkGetMemoryWin32HandleKHR(device, &getWin32HandleInfo, &handle);
+                        HANDLE handle = NULL;
+                        VkMemoryGetWin32HandleInfoKHR getWin32HandleInfo{};
+                        getWin32HandleInfo.sType =
+                            VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
+                        getWin32HandleInfo.memory =
+                            textureImages[img_num].imageMemories[i];
+                        getWin32HandleInfo.handleType =
+                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+                        vkGetMemoryWin32HandleKHR(device, &getWin32HandleInfo,
+                                                  &handle);
 
-                const cl_mem_properties props[] = {
-                    externalMemType,
-                    (cl_mem_properties)handle,
-                    0,
-                };
+                        const cl_mem_properties props[] = {
+                            externalMemType,
+                            (cl_mem_properties)handle,
+                            0,
+                        };
 #elif defined(__linux__)
-                int fd = 0;
-                VkMemoryGetFdInfoKHR getFdInfo{};
-                getFdInfo.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-                getFdInfo.memory = textureImageMemories[i];
-                getFdInfo.handleType =
-                    externalMemType == CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_FD_KHR
-                    ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
-                    : VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-                vkGetMemoryFdKHR(device, &getFdInfo, &fd);
+                        int fd = 0;
+                        VkMemoryGetFdInfoKHR getFdInfo{};
+                        getFdInfo.sType =
+                            VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+                        getFdInfo.memory =
+                            textureImages[img_num]
+                                .imageMemories[i]; // textureImageMemories[i];
+                        getFdInfo.handleType = externalMemType
+                                == CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_FD_KHR
+                            ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
+                            : VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                        vkGetMemoryFdKHR(device, &getFdInfo, &fd);
 
-                const cl_mem_properties props[] = {
-                    externalMemType,
-                    (cl_mem_properties)fd,
-                    0,
-                };
+                        const cl_mem_properties props[] = {
+                            externalMemType,
+                            (cl_mem_properties)fd,
+                            0,
+                        };
 #else
-                const cl_mem_properties* props = NULL;
+                        const cl_mem_properties* props = NULL;
 #endif
 
-                cl::vector<cl_mem_properties> vprops(sizeof(props)
-                                                     / sizeof(props[0]));
-                std::memcpy(vprops.data(), props,
-                            sizeof(cl_mem_properties) * vprops.size());
+                        cl::vector<cl_mem_properties> vprops(
+                            sizeof(props) / sizeof(props[0]));
+                        std::memcpy(vprops.data(), props,
+                                    sizeof(cl_mem_properties) * vprops.size());
 
-                mems[i].reset(new cl::Image2D(
-                    context, vprops, CL_MEM_WRITE_ONLY,
-                    cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwx, gwy));
-            }
-            else
-            {
-                mems[i].reset(new cl::Image2D{
-                    context, CL_MEM_WRITE_ONLY,
-                    cl::ImageFormat{ CL_RGBA, CL_UNORM_INT8 }, gwx, gwy });
+                        mems[target][i].reset(new cl::Image2D(
+                            context, vprops, CL_MEM_WRITE_ONLY,
+                            cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwx, gwy));
+                    }
+                    else
+                    {
+                        mems[target][i].reset(new cl::Image2D{
+                            context, CL_MEM_WRITE_ONLY,
+                            cl::ImageFormat{ CL_RGBA, CL_UNORM_INT8 }, gwx,
+                            gwy });
+                    }
+                }
             }
         }
     }
@@ -629,6 +665,8 @@ private:
         createFramebuffers();
         createCommandPool();
 
+        createVertexBuffers();
+        createIndexBuffers();
 
         createTextureImages();
         createTextureImageViews();
@@ -642,6 +680,8 @@ private:
     void mainLoop()
     {
         glfwSetKeyCallback(window, keyboard);
+        glfwSetMouseButtonCallback(window, mouse_event);
+        glfwSetCursorPosCallback(window, mouse_pos);
 
         while (!glfwWindowShouldClose(window))
         {
@@ -680,6 +720,48 @@ private:
         }
     }
 
+    void mouse_event(int button, int action, int mods) {
+        double x, y;
+        glfwGetCursorPos(window, &x, &y);
+        switch (action) {
+            case 0:
+                // Button Up
+                if (button == 1) {
+                    camera.drag = false;
+                }
+                break;
+            case 1:
+                // Button Down
+                if (button == 1) {
+                    camera.drag = true;
+                    camera.begin = glm::vec2(x, y);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    void mouse_pos(double pX, double pY)
+    {
+        if (!camera.drag)
+            return;
+
+        glm::vec2 off = camera.begin - glm::vec2(pX, pY);
+        camera.begin = glm::vec2(pX, pY);
+
+        camera.yaw -= off.x * DRAG_SPEED_FAC;
+        camera.pitch += off.y * DRAG_SPEED_FAC;
+        glm::vec3 dir(
+            cos(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch)),
+            sin(glm::radians(camera.pitch)),
+            sin(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch)));
+
+        camera.dir = glm::normalize(dir);
+        camera.rvec = glm::normalize(glm::cross(camera.dir, glm::vec3(0, 1, 0)));
+        camera.up = glm::normalize(glm::cross(camera.rvec, camera.dir));
+    }
+
     void cleanup()
     {
         for (auto semaphore : signalSemaphores)
@@ -710,25 +792,30 @@ private:
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
 
-        for (auto textureImageView : textureImageViews)
+        for (size_t img_num = 0; img_num < textureImages.size(); img_num++ )
         {
-            vkDestroyImageView(device, textureImageView, nullptr);
-        }
-        for (auto textureImage : textureImages)
-        {
-            vkDestroyImage(device, textureImage, nullptr);
-        }
-        for (auto textureImageMemory : textureImageMemories)
-        {
-            vkFreeMemory(device, textureImageMemory, nullptr);
+            for (auto textureImageView : textureImages[img_num].imageViews)
+            {
+                vkDestroyImageView(device, textureImageView, nullptr);
+            }
+            for (auto textureImage : textureImages[img_num].images)
+            {
+                vkDestroyImage(device, textureImage, nullptr);
+            }
+            for (auto textureImageMemory : textureImages[img_num].imageMemories)
+            {
+                vkFreeMemory(device, textureImageMemory, nullptr);
+            }
         }
 
-        vkDestroySampler(device, textureSampler, nullptr);
+        for (size_t sampler_num = 0; sampler_num < textureSampler.size(); sampler_num++ )
+        {
+            vkDestroySampler(device, textureSampler[sampler_num], nullptr);
+        }
 
         vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
 
-
-
+        // cleanup vertices buffers
         for (auto buffer : vertexBuffers) {
             vkDestroyBuffer(device, buffer, nullptr);
         }
@@ -737,7 +824,14 @@ private:
             vkFreeMemory(device, bufferMemory, nullptr);
         }
 
+        // cleanup indices buffers
+        for (auto buffer : indexBuffers) {
+            vkDestroyBuffer(device, buffer, nullptr);
+        }
 
+        for (auto bufferMemory : indexBufferMemories) {
+            vkFreeMemory(device, bufferMemory, nullptr);
+        }
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
@@ -1169,23 +1263,29 @@ private:
 
     void createDescriptorSetLayout()
     {
-        VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-        samplerLayoutBinding.binding = 0;
-        samplerLayoutBinding.descriptorCount = 1;
-        samplerLayoutBinding.descriptorType =
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        samplerLayoutBinding.pImmutableSamplers = nullptr;
-        samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutBinding sampler0LayoutBinding{};
+        sampler0LayoutBinding.binding = 0;
+        sampler0LayoutBinding.descriptorCount = 1;
+        sampler0LayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sampler0LayoutBinding.pImmutableSamplers = nullptr;
+        sampler0LayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutBinding sampler1LayoutBinding{};
+        sampler1LayoutBinding.binding = 1;
+        sampler1LayoutBinding.descriptorCount = 1;
+        sampler1LayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sampler1LayoutBinding.pImmutableSamplers = nullptr;
+        sampler1LayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutBinding uniformLayoutBinding{};
-        uniformLayoutBinding.binding = 1;
+        uniformLayoutBinding.binding = 2;
         uniformLayoutBinding.descriptorCount = 1;
         uniformLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         uniformLayoutBinding.pImmutableSamplers = nullptr;
         uniformLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-        std::array<VkDescriptorSetLayoutBinding, 2> bindings = {
-            samplerLayoutBinding, uniformLayoutBinding
+        std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
+            sampler0LayoutBinding, sampler1LayoutBinding, uniformLayoutBinding
         };
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -1227,7 +1327,6 @@ private:
             vertShaderStageInfo, fragShaderStageInfo
         };
 
-
         // vertex info
         auto bindingDescription = Vertex::getBindingDescription();
         auto attributeDescriptions = Vertex::getAttributeDescriptions();
@@ -1238,7 +1337,6 @@ private:
         vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
         vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
         vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
-
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType =
@@ -1385,25 +1483,6 @@ private:
 
     void createVertexBuffers() {
 
-
-#if 0
-        // Add Quad Strip primitve sets
-        // Each quad strip draws one row of NX quads
-        for (int iBaseTo, iBaseFrom = 0, iY = 0; iY < NY;
-             iY++, iBaseFrom = iBaseTo)
-        {
-            iBaseTo = iBaseFrom + NX + 1;
-            DrawElementsUInt* indices =
-                new DrawElementsUInt(PrimitiveSet::QUAD_STRIP, NX + NX + 2);
-            for (int iX = 0; iX <= NX; iX++)
-            {
-                (*indices)[iX + iX + 0] = iBaseFrom + iX;
-                (*indices)[iX + iX + 1] = iBaseTo + iX;
-            }
-            geometry->addPrimitiveSet(indices);
-        }
-#endif
-
         int iCXY = ( NX + 1 ) * ( NY + 1 );
         verts.resize(iCXY);
 
@@ -1427,6 +1506,10 @@ private:
             ty += dty;
         }
 
+        vertexBuffers.resize(swapChainImages.size());
+        vertexBufferMemories.resize(swapChainImages.size());
+
+#if 0
         VkBufferCreateInfo bufferInfo{};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufferInfo.size = sizeof(verts[0]) * verts.size();
@@ -1435,9 +1518,6 @@ private:
 
         VkMemoryPropertyFlags properties =
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-
-        vertexBuffers.resize(swapChainImages.size());
-        vertexBufferMemories.resize(swapChainImages.size());
 
         for (size_t i = 0; i < swapChainImages.size(); i++) {
 
@@ -1467,9 +1547,81 @@ private:
                 memcpy(data, verts.data(), (size_t) bufferInfo.size);
             vkUnmapMemory(device, vertexBufferMemories[i]);
         }
+#else
+
+
+        VkDeviceSize bufferSize = sizeof(verts[0]) * verts.size();
+
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+            memcpy(data, verts.data(), (size_t) bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        for (size_t i = 0; i < swapChainImages.size(); i++) {
+
+            // create local memory buffer
+            createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         vertexBuffers[i], vertexBufferMemories[i]);
+
+            copyBuffer(stagingBuffer, vertexBuffers[i], bufferSize);
+        }
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+#endif
     }
 
 
+
+    void createIndexBuffers() {
+
+        // Add Tri Strip primitve sets
+        inds.resize(NX + NX + 2);
+        // Each tri strip draws one row of NX quads
+        for (int iBaseTo, iBaseFrom = 0, iY = 0; iY < NY;
+             iY++, iBaseFrom = iBaseTo)
+        {
+            iBaseTo = iBaseFrom + NX + 1;
+            for (int iX = 0; iX <= NX; iX++)
+            {
+                inds[iX + iX + 0] = iBaseFrom + iX;
+                inds[iX + iX + 1] = iBaseTo + iX;
+            }
+        }
+
+        indexBuffers.resize(swapChainImages.size());
+        indexBufferMemories.resize(swapChainImages.size());
+
+        VkDeviceSize bufferSize = sizeof(inds[0]) * inds.size();
+
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+            memcpy(data, inds.data(), (size_t) bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        for (size_t i = 0; i < swapChainImages.size(); i++) {
+
+            // create local memory buffer
+            createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         indexBuffers[i], indexBufferMemories[i]);
+
+            copyBuffer(stagingBuffer, indexBuffers[i], bufferSize);
+        }
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+    }
 
     void createTextureImages()
     {
@@ -1488,36 +1640,41 @@ private:
                          | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                      stagingBuffer, stagingBufferMemory);
 
-        textureImages.resize(swapChainImages.size());
-        textureImageMemories.resize(swapChainImages.size());
-
-        for (size_t i = 0; i < swapChainImages.size(); i++)
+        for (size_t img_num = 0; img_num < textureImages.size(); img_num++ )
         {
-            createShareableImage(
-                texWidth, texHeight, VK_FORMAT_R8G8B8A8_UNORM, tiling,
-                VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                properties, textureImages[i], textureImageMemories[i]
-            );
-            if (useExternalMemory)
+            textureImages[img_num].images.resize(swapChainImages.size());
+            textureImages[img_num].imageMemories.resize(swapChainImages.size());
+
+            for (size_t i = 0; i < swapChainImages.size(); i++)
             {
-                transitionImageLayout(textureImages[i],
-                                      VK_FORMAT_R8G8B8A8_UNORM,
-                                      VK_IMAGE_LAYOUT_UNDEFINED,
-                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                createShareableImage(
+                    texWidth, texHeight, VK_FORMAT_R32G32B32A32_SFLOAT, tiling,
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    properties, textureImages[img_num].images[i], textureImages[img_num].imageMemories[i]
                 );
+                if (useExternalMemory)
+                {
+                    transitionImageLayout(textureImages[img_num].images[i],
+                                          VK_FORMAT_R32G32B32A32_SFLOAT,
+                                          VK_IMAGE_LAYOUT_UNDEFINED,
+                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                    );
+                }
             }
         }
     }
 
     void createTextureImageViews()
     {
-        textureImageViews.resize(swapChainImages.size());
-
-        for (size_t i = 0; i < swapChainImages.size(); i++)
+        for (size_t img_num = 0; img_num < textureImages.size(); img_num++ )
         {
-            textureImageViews[i] =
-                createImageView(textureImages[i], VK_FORMAT_R8G8B8A8_UNORM
-                );
+            textureImages[img_num].imageViews.resize(swapChainImages.size());
+
+            for (size_t i = 0; i < swapChainImages.size(); i++)
+            {
+                textureImages[img_num].imageViews[i] =
+                    createImageView(textureImages[img_num].images[i], VK_FORMAT_R32G32B32A32_SFLOAT);
+            }
         }
     }
 
@@ -1536,10 +1693,13 @@ private:
         samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
         samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 
-        if (vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler)
-            != VK_SUCCESS)
+        for (size_t sampler_num = 0; sampler_num < textureSampler.size(); sampler_num++ )
         {
-            throw std::runtime_error("failed to create texture sampler!");
+            if (vkCreateSampler(device, &samplerInfo, nullptr, &textureSampler[sampler_num])
+                != VK_SUCCESS)
+            {
+                throw std::runtime_error("failed to create texture sampler!");
+            }
         }
     }
 
@@ -1856,10 +2016,14 @@ private:
 
         for (size_t i = 0; i < swapChainImages.size(); i++)
         {
-            VkDescriptorImageInfo imageInfo{};
-            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo.imageView = textureImageViews[i];
-            imageInfo.sampler = textureSampler;
+            VkDescriptorImageInfo imageInfo[(size_t)InteropTexType::IOPT_COUNT] = {0};
+            imageInfo[IOPT_DISPLACEMENT].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfo[IOPT_DISPLACEMENT].imageView = textureImages[IOPT_DISPLACEMENT].imageViews[i];
+            imageInfo[IOPT_DISPLACEMENT].sampler = textureSampler[IOPT_DISPLACEMENT];
+
+            imageInfo[IOPT_NORMAL_MAP].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfo[IOPT_NORMAL_MAP].imageView = textureImages[IOPT_NORMAL_MAP].imageViews[i];
+            imageInfo[IOPT_NORMAL_MAP].sampler = textureSampler[IOPT_NORMAL_MAP];
 
             VkDescriptorBufferInfo bufferInfo{};
             bufferInfo.buffer = uniformBuffers[i];
@@ -1868,23 +2032,29 @@ private:
 
             std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
 
-            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = descriptorSets[i];
-            descriptorWrites[1].dstBinding = 1u;
-            descriptorWrites[1].dstArrayElement = 0;
-            descriptorWrites[1].descriptorType =
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[1].descriptorCount = 1;
-            descriptorWrites[1].pBufferInfo = &bufferInfo;
+            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[0].dstSet = descriptorSets[i];
+            descriptorWrites[0].dstBinding = 0u;
+            descriptorWrites[0].dstArrayElement = 0;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrites[0].descriptorCount = 1;
+            descriptorWrites[0].pImageInfo = &imageInfo[IOPT_DISPLACEMENT];
 
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = descriptorSets[i];
-            descriptorWrites[0].dstBinding = 0;
+            descriptorWrites[0].dstBinding = 1u;
             descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType =
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pImageInfo = &imageInfo;
+            descriptorWrites[0].pImageInfo = &imageInfo[IOPT_NORMAL_MAP];
+
+            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[2].dstSet = descriptorSets[i];
+            descriptorWrites[2].dstBinding = 2u;
+            descriptorWrites[2].dstArrayElement = 0;
+            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrites[2].descriptorCount = 1;
+            descriptorWrites[2].pBufferInfo = &bufferInfo;
 
             vkUpdateDescriptorSets(
                 device, static_cast<uint32_t>(descriptorWrites.size()),
@@ -1923,6 +2093,42 @@ private:
         }
 
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
+    }
+
+
+    void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool = commandPool;
+        allocInfo.commandBufferCount = 1;
+
+        VkCommandBuffer commandBuffer;
+        vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = 0; // Optional
+        copyRegion.dstOffset = 0; // Optional
+        copyRegion.size = size;
+        vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &copyRegion);
+
+        vkEndCommandBuffer(commandBuffer);
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(graphicsQueue);
+
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
     }
 
     uint32_t findMemoryType(uint32_t typeFilter,
@@ -2028,11 +2234,13 @@ private:
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(commandBuffers[i], 0, 1, &vertexBuffers[i], offsets);
 
+            vkCmdBindIndexBuffer(commandBuffers[i], indexBuffers[i], 0, VK_INDEX_TYPE_UINT16);
+
             vkCmdBindDescriptorSets(
                 commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipelineLayout, 0, 1, &descriptorSets[i], 0, nullptr);
 
-            vkCmdDraw(commandBuffers[i], 4, 1, 0, 0);
+            vkCmdDrawIndexed(commandBuffers[i], static_cast<uint32_t>(inds.size()), 1, 0, 0, 0);
 
             vkCmdEndRenderPass(commandBuffers[i]);
 
@@ -2105,12 +2313,20 @@ private:
         }
     }
 
-    void updateTexture(uint32_t currentImage)
+    void updateUniforms(uint32_t currentImage)
     {
         UniformBufferObject ubo = {};
         ubo.ocean_size = NX;
 
-        // TODO: dont forget to complement uniform buffer structure
+        // update camera related uniform
+        glm::mat4 view_matrix = glm::lookAt(camera.eye, camera.eye + camera.dir, camera.up);
+
+        float fov = glm::radians(60.0);
+        float aspect = gwx / (float)gwy;
+        glm::mat4 proj_matrix = glm::perspective(fov, aspect, 0.1f, 100.0f);
+        proj_matrix[1][1] *= -1;
+
+        ubo.view_proj = view_matrix * proj_matrix;
 
         transitionUniformLayout(uniformBuffers[currentImage],
                                 VK_ACCESS_SHADER_READ_BIT,
@@ -2124,16 +2340,26 @@ private:
         transitionUniformLayout(uniformBuffers[currentImage],
                                 VK_ACCESS_TRANSFER_WRITE_BIT,
                                 VK_ACCESS_SHADER_READ_BIT);
+    }
 
-        if (useExternalMemory)
+    void updateOcean(uint32_t currentImage)
+    {
+        updateUniforms(currentImage);
+
+        int kernel_arg_ind=0;
+        for (size_t target=0; target<IOPT_COUNT; target++)
         {
-            commandQueue.enqueueAcquireExternalMemObjects(
-                { (*mems[currentImage]) });
-        }
+            if (useExternalMemory)
+            {
+                commandQueue.enqueueAcquireExternalMemObjects(
+                    { (*mems[target][currentImage]) });
+            }
 
-        kernel.setArg(0, *mems[currentImage]);
-        kernel.setArg(1, cr);
-        kernel.setArg(2, ci);
+            kernel.setArg(kernel_arg_ind, *mems[target][currentImage]);
+            kernel_arg_ind++;
+        }
+        kernel.setArg(kernel_arg_ind, cr); kernel_arg_ind++;
+        kernel.setArg(kernel_arg_ind, ci);
 
         cl::NDRange lws; // NullRange by default.
         if (lwx > 0 && lwy > 0)
@@ -2146,47 +2372,53 @@ private:
 
         if (useExternalMemory)
         {
-            commandQueue.enqueueReleaseExternalMemObjects(
-                { *mems[currentImage] });
-            if (useExternalSemaphore)
+            for (size_t target=0; target<IOPT_COUNT; target++)
             {
-                commandQueue.enqueueSignalSemaphores(
-                    { signalSemaphores[currentFrame] }, {}, nullptr, nullptr);
-                commandQueue.flush();
-            }
-            else
-            {
-                commandQueue.finish();
+                commandQueue.enqueueReleaseExternalMemObjects(
+                    { *mems[target][currentImage] });
+                if (useExternalSemaphore)
+                {
+                    commandQueue.enqueueSignalSemaphores(
+                        { signalSemaphores[currentFrame] }, {}, nullptr, nullptr);
+                    commandQueue.flush();
+                }
+                else
+                {
+                    commandQueue.finish();
+                }
             }
         }
         else
         {
-            size_t rowPitch = 0;
-            void* pixels = commandQueue.enqueueMapImage(
-                *mems[currentImage], CL_TRUE, CL_MAP_READ, { 0, 0, 0 },
-                { gwx, gwy, 1 }, &rowPitch, nullptr);
+            for (size_t target=0; target<IOPT_COUNT; target++)
+            {
+                size_t rowPitch = 0;
+                void* pixels = commandQueue.enqueueMapImage(
+                    *mems[target][currentImage], CL_TRUE, CL_MAP_READ, { 0, 0, 0 },
+                    { gwx, gwy, 1 }, &rowPitch, nullptr);
 
-            VkDeviceSize imageSize = gwx * gwy * 4;
+                VkDeviceSize imageSize = gwx * gwy * 4;
 
-            void* data;
-            vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-            memcpy(data, pixels, static_cast<size_t>(imageSize));
-            vkUnmapMemory(device, stagingBufferMemory);
+                void* data;
+                vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
+                memcpy(data, pixels, static_cast<size_t>(imageSize));
+                vkUnmapMemory(device, stagingBufferMemory);
 
-            commandQueue.enqueueUnmapMemObject(*mems[currentImage], pixels);
-            commandQueue.flush();
+                commandQueue.enqueueUnmapMemObject(*mems[target][currentImage], pixels);
+                commandQueue.flush();
 
-            transitionImageLayout(textureImages[currentImage],
-                                  VK_FORMAT_R8G8B8A8_UNORM,
-                                  VK_IMAGE_LAYOUT_UNDEFINED,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            copyBufferToImage(stagingBuffer, textureImages[currentImage],
-                              static_cast<uint32_t>(gwx),
-                              static_cast<uint32_t>(gwy));
-            transitionImageLayout(textureImages[currentImage],
-                                  VK_FORMAT_R8G8B8A8_UNORM,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                transitionImageLayout(textureImages[target].images[currentImage],
+                                      VK_FORMAT_R32G32B32A32_SFLOAT,
+                                      VK_IMAGE_LAYOUT_UNDEFINED,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                copyBufferToImage(stagingBuffer, textureImages[target].images[currentImage],
+                                  static_cast<uint32_t>(gwx),
+                                  static_cast<uint32_t>(gwy));
+                transitionImageLayout(textureImages[target].images[currentImage],
+                                      VK_FORMAT_R32G32B32A32_SFLOAT,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            }
         }
     }
 
@@ -2224,7 +2456,7 @@ private:
                               imageAvailableSemaphores[currentFrame],
                               VK_NULL_HANDLE, &imageIndex);
 
-        updateTexture(imageIndex);
+        updateOcean(imageIndex);
 
         if (imagesInFlight[imageIndex] != VK_NULL_HANDLE)
         {
@@ -2742,17 +2974,30 @@ private:
         return VK_FALSE;
     }
 
-    static void keyboard(GLFWwindow* pWindow, int key, int scancode, int action,
+    static void keyboard(GLFWwindow* window, int key, int scancode, int action,
                          int mods)
     {
-        auto pApp = (JuliaVKApplication*)glfwGetWindowUserPointer(pWindow);
-        pApp->keyboard(key, scancode, action, mods);
+        auto app = (OceanApplication*)glfwGetWindowUserPointer(window);
+        app->keyboard(key, scancode, action, mods);
+    }
+
+    static void mouse_event(GLFWwindow* window, int button, int action, int mods) {
+        auto app = (OceanApplication*)glfwGetWindowUserPointer(window);
+        app->mouse_event(button, action, mods);
+    }
+
+    static void mouse_pos(GLFWwindow* window, double pX, double pY)
+    {
+        auto app = (OceanApplication*)glfwGetWindowUserPointer(window);
+        app->mouse_pos(pX, pY);
     }
 };
 
+} // anonymous namespace
+
 int main(int argc, char** argv)
 {
-    JuliaVKApplication app;
+    OceanApplication app;
 
     try
     {

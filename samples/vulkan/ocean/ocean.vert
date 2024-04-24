@@ -1,14 +1,13 @@
 #version 450
 
-layout(location = 0) out vec3 frag_color;
+layout(location = 0) out vec4 frag_color;
 layout(location = 1) out vec2 frag_tex_coord;
-layout(location = 2) out vec3 view_coord;
+layout(location = 2) out vec4 view_coord;
 
 layout(location = 0) in vec3 in_position;
 layout(location = 1) in vec2 in_tex_coords;
 
 layout(binding = 1) uniform sampler2D u_displacement_map;
-
 layout(binding = 2) uniform ViewData {
     uniform mat4 view_mat;
 	uniform mat4 proj_mat;
