@@ -6,19 +6,17 @@ layout(location = 2) in vec4 view_coord;
 
 layout(location = 0) out vec4 out_color;
 
-layout(binding = 0) uniform sampler2D u_normal_map;
+layout(binding = 1) uniform sampler2D u_normal_map;
 layout(binding = 2) uniform ViewData {
-	uniform mat4 view_mat;
-	uniform mat4 proj_mat;
+	uniform mat4 view_proj_mat;
 	uniform vec3 sun_dir;
 	uniform vec3 cam_pos;
-	uniform int patch_size;
+	uniform int ocean_size;
 	uniform int tex_size;
 } view;
 
 
 void main() {
-
 
 #if 0
 	vec3 sky_color = vec3(3.2f, 9.6f, 12.8f);
@@ -39,7 +37,9 @@ void main() {
 	out_color = vec4(HDR(color, exposure), 1.f);
 #else
 
-	out_color = frag_color;
+	vec3 normal = texture(u_normal_map, frag_tex_coord).rgb;
+	out_color = vec4( frag_color.rgb * normal, 1.0 );
+	//out_color = vec4( 1.0 );
 
 #endif
 }

@@ -62,23 +62,30 @@ all
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
-// ocean mesh patch size
-#define NX 1024
-#define NY 1024
 
-#define WX 1.f
-#define WY 1.f
+#define DRAG_SPEED_FAC 0.2f
+#define ROLL_SPEED_FAC 2.f
 
-#define DRAG_SPEED_FAC 0.05f
+
+//Plan prac:
+//    1) dodaj do projektu juliavk dla porównania - DONE
+//    2) teksture julia nakladaj na siatke zeby widziec efekt obracania - DONE
+//    3) rozpoczynamy prace nad symulacja w OpenCL
+//    4) adaptacja shaderow do symulacji oceanu
+//         -displacement
+//         -normalne
+//    5) dodanie trybu wireframe
+//    6) dodanie oswietlenia do sceny
+//    7) adaptacja do srodowiska SDK
+//    8) readme, szlify, PR
+
 
 
 namespace {
 
-std::int32_t current_array_layer = 0;
-
 const char kernelString[] =
 
-R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci ))
+R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci )
 {
     const float cMinX = -1.5f;
     const float cMaxX =  1.5f;
@@ -116,7 +123,7 @@ R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci ))
     result = min( result, 1.0f );
 
     // RGBA
-    float4 color = (float4)(result + 0.6f, result, result * result, 1.0f);)
+    float4 color = (float4)(result + 0.6f, result, result * result, 1.0f);
     write_imagef(dst, (int2)(x, y), color);
 }
 )CLC";
@@ -188,7 +195,7 @@ struct SwapChainSupportDetails
 
 struct UniformBufferObject
 {
-    alignas(4) glm::mat4    view_proj;
+    alignas(4) glm::mat4    view_proj_mat;
     alignas(4) glm::vec3    sun_dir;
     alignas(4) glm::vec3    cam_pos;
     alignas(4) std::int32_t ocean_size = 0;
@@ -256,18 +263,30 @@ public:
     }
 
 private:
-    GLFWwindow* window;
 
+    GLFWwindow* window;
     Camera camera;
 
     bool animate = false;
     bool redraw = false;
 
-    size_t gwx = 512;
-    size_t gwy = 512;
+    // mesh patch size
+    size_t mesh_size_x = 1024;
+    size_t mesh_size_y = 1024;
 
-    size_t lwx = 0;
-    size_t lwy = 0;
+    // mesh patch spacing
+    float mesh_spacing_x = 1.f;
+    float mesh_spacing_y = 1.f;
+
+    // ocean texture patch size
+    size_t tex_size_s = 512;
+    size_t tex_size_t = 512;
+
+    size_t group_size_x = 0;
+    size_t group_size_y = 0;
+
+    size_t window_width = 512;
+    size_t window_height = 512;
 
     float cr = -0.123f;
     float ci = 0.745f;
@@ -333,9 +352,12 @@ private:
     std::vector<VkBuffer> vertexBuffers;
     std::vector<VkDeviceMemory> vertexBufferMemories;
 
-    std::vector <std::uint16_t> inds;
-    std::vector<VkBuffer> indexBuffers;
-    std::vector<VkDeviceMemory> indexBufferMemories;
+    std::vector <std::uint32_t> inds;
+    struct IndexBuffer {
+        std::vector<VkBuffer> buffers;
+        std::vector<VkDeviceMemory> bufferMemories;
+    };
+    std::vector<IndexBuffer> indexBuffers;
 
     std::array<VkSampler, IOPT_COUNT> textureSampler;
 
@@ -422,12 +444,19 @@ private:
                              &linearImages);
         op.add<popl::Switch>("", "nodevicelocal",
                              "Do not use device local images", &noDeviceLocal);
+
         op.add<popl::Value<size_t>>(
-            "", "gwx", "Global Work Size X AKA Image Width", gwx, &gwx);
+            "", "window_width", "Window width", window_width, &window_width);
         op.add<popl::Value<size_t>>(
-            "", "gwy", "Global Work Size Y AKA Image Height", gwy, &gwy);
-        op.add<popl::Value<size_t>>("", "lwx", "Local Work Size X", lwx, &lwx);
-        op.add<popl::Value<size_t>>("", "lwy", "Local Work Size Y", lwy, &lwy);
+            "", "window_height", "Window height", window_height, &window_height);
+
+        op.add<popl::Value<size_t>>(
+            "", "tex_size_s", "Ocean patch size X AKA global work size", tex_size_s, &tex_size_s);
+        op.add<popl::Value<size_t>>(
+            "", "tex_size_t", "Ocean patch size Y AKA global work size", tex_size_t, &tex_size_t);
+
+        op.add<popl::Value<size_t>>("", "group_size_x", "Local Work Size X", group_size_x, &group_size_x);
+        op.add<popl::Value<size_t>>("", "group_size_y", "Local Work Size Y", group_size_y, &group_size_y);
         op.add<popl::Switch>("", "immediate",
                              "Prefer VK_PRESENT_MODE_IMMEDIATE_KHR (no vsync)",
                              &immediate);
@@ -471,7 +500,7 @@ private:
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-        window = glfwCreateWindow((int)gwx, (int)gwy, "Julia Set with Vulkan",
+        window = glfwCreateWindow((int)window_width, (int)window_height, "Julia Set with Vulkan",
                                   nullptr, nullptr);
         glfwSetWindowUserPointer(window, this);
     }
@@ -621,14 +650,14 @@ private:
 
                         mems[target][i].reset(new cl::Image2D(
                             context, vprops, CL_MEM_WRITE_ONLY,
-                            cl::ImageFormat(CL_RGBA, CL_UNORM_INT8), gwx, gwy));
+                            cl::ImageFormat(CL_RGBA, CL_FLOAT), tex_size_s, tex_size_t));
                     }
                     else
                     {
                         mems[target][i].reset(new cl::Image2D{
                             context, CL_MEM_WRITE_ONLY,
-                            cl::ImageFormat{ CL_RGBA, CL_UNORM_INT8 }, gwx,
-                            gwy });
+                            cl::ImageFormat{ CL_RGBA, CL_FLOAT }, tex_size_s,
+                            tex_size_t });
                     }
                 }
             }
@@ -682,6 +711,7 @@ private:
         glfwSetKeyCallback(window, keyboard);
         glfwSetMouseButtonCallback(window, mouse_event);
         glfwSetCursorPosCallback(window, mouse_pos);
+        glfwSetScrollCallback(window, mouse_roll);
 
         while (!glfwWindowShouldClose(window))
         {
@@ -726,16 +756,12 @@ private:
         switch (action) {
             case 0:
                 // Button Up
-                if (button == 1) {
-                    camera.drag = false;
-                }
+                camera.drag = false;
                 break;
             case 1:
                 // Button Down
-                if (button == 1) {
-                    camera.drag = true;
-                    camera.begin = glm::vec2(x, y);
-                }
+                camera.drag = true;
+                camera.begin = glm::vec2(x, y);
                 break;
             default:
                 break;
@@ -760,6 +786,11 @@ private:
         camera.dir = glm::normalize(dir);
         camera.rvec = glm::normalize(glm::cross(camera.dir, glm::vec3(0, 1, 0)));
         camera.up = glm::normalize(glm::cross(camera.rvec, camera.dir));
+    }
+
+    void mouse_roll(double offset_x, double offset_y)
+    {
+        camera.eye += camera.dir * (float)offset_y * ROLL_SPEED_FAC;
     }
 
     void cleanup()
@@ -825,12 +856,20 @@ private:
         }
 
         // cleanup indices buffers
-        for (auto buffer : indexBuffers) {
-            vkDestroyBuffer(device, buffer, nullptr);
+        for (auto ind_buffer : indexBuffers)
+        {
+            for(auto buffer : ind_buffer.buffers)
+            {
+                vkDestroyBuffer(device, buffer, nullptr);
+            }
         }
 
-        for (auto bufferMemory : indexBufferMemories) {
-            vkFreeMemory(device, bufferMemory, nullptr);
+        for (auto ind_buffer : indexBuffers)
+        {
+            for (auto bufferMemory : ind_buffer.bufferMemories)
+            {
+                vkFreeMemory(device, bufferMemory, nullptr);
+            }
         }
 
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
@@ -1282,7 +1321,7 @@ private:
         uniformLayoutBinding.descriptorCount = 1;
         uniformLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         uniformLayoutBinding.pImmutableSamplers = nullptr;
-        uniformLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        uniformLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT;
 
         std::array<VkDescriptorSetLayoutBinding, 3> bindings = {
             sampler0LayoutBinding, sampler1LayoutBinding, uniformLayoutBinding
@@ -1483,26 +1522,27 @@ private:
 
     void createVertexBuffers() {
 
-        int iCXY = ( NX + 1 ) * ( NY + 1 );
+        int iCXY = ( mesh_size_x + 1 ) * ( mesh_size_y + 1 );
         verts.resize(iCXY);
 
         // Initialize vertices and normals to default (row, column, 0) and (0,
         // 0, 1) This step is not really neccessary (its just in case something
         // went wrong) Verts and normals will be updated with wave height field
         // every frame
-        cl_float dfY = -0.5 * (NY * WY), dfBaseX = -0.5 * (NX * WX);
-        cl_float tx=0.f, ty=0.f, dtx = 1.f / NX, dty= 1.f / NY;
-        for (int iBase = 0, iY = 0; iY <= NY; iY++, iBase += NX + 1)
+        cl_float dfY = -0.5 * (mesh_size_y * mesh_spacing_y), dfBaseX = -0.5 * (mesh_size_x * mesh_spacing_x);
+        cl_float tx=0.f, ty=0.f, dtx = 1.f / mesh_size_x, dty= 1.f / mesh_size_y;
+        for (int iBase = 0, iY = 0; iY <= mesh_size_y; iY++, iBase += mesh_size_x + 1)
         {
+            tx=0.f;
             double dfX = dfBaseX;
-            for (int iX = 0; iX <= NX; iX++)
+            for (int iX = 0; iX <= mesh_size_x; iX++)
             {
                 verts[iBase + iX].pos = glm::vec3(dfX, dfY, 0.0);
                 verts[iBase + iX].tc = glm::vec2(tx, ty);
                 tx += dtx;
-                dfX += WX;
+                dfX += mesh_spacing_x;
             }
-            dfY += WY;
+            dfY += mesh_spacing_y;
             ty += dty;
         }
 
@@ -1576,49 +1616,55 @@ private:
 #endif
     }
 
-
-
-    void createIndexBuffers() {
-
+    void createIndexBuffers()
+    {
+        indexBuffers.resize(mesh_size_y);
         // Add Tri Strip primitve sets
-        inds.resize(NX + NX + 2);
-        // Each tri strip draws one row of NX quads
-        for (int iBaseTo, iBaseFrom = 0, iY = 0; iY < NY;
-             iY++, iBaseFrom = iBaseTo)
-        {
-            iBaseTo = iBaseFrom + NX + 1;
-            for (int iX = 0; iX <= NX; iX++)
-            {
-                inds[iX + iX + 0] = iBaseFrom + iX;
-                inds[iX + iX + 1] = iBaseTo + iX;
-            }
-        }
-
-        indexBuffers.resize(swapChainImages.size());
-        indexBufferMemories.resize(swapChainImages.size());
+        inds.resize((mesh_size_x + 1) * 2);
 
         VkDeviceSize bufferSize = sizeof(inds[0]) * inds.size();
 
         VkBuffer stagingBuffer;
         VkDeviceMemory stagingBufferMemory;
         createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                         | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     stagingBuffer, stagingBufferMemory);
 
-        void* data;
-        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
-            memcpy(data, inds.data(), (size_t) bufferSize);
-        vkUnmapMemory(device, stagingBufferMemory);
+        // Each tri strip draws one row of NX quads
+        for (int iBaseTo, iBaseFrom = 0, iY = 0; iY < mesh_size_y;
+             iY++, iBaseFrom = iBaseTo)
+        {
+            iBaseTo = iBaseFrom + mesh_size_x + 1;
+            for (int iX = 0; iX <= mesh_size_x; iX++)
+            {
+                inds[iX * 2 + 0] = iBaseFrom + iX;
+                inds[iX * 2 + 1] = iBaseTo + iX;
+            }
 
-        for (size_t i = 0; i < swapChainImages.size(); i++) {
+            indexBuffers[iY].buffers.resize(swapChainImages.size());
+            indexBuffers[iY].bufferMemories.resize(swapChainImages.size());
 
-            // create local memory buffer
-            createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                         indexBuffers[i], indexBufferMemories[i]);
+            void* data;
+            vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+            memcpy(data, inds.data(), (size_t)bufferSize);
+            vkUnmapMemory(device, stagingBufferMemory);
 
-            copyBuffer(stagingBuffer, indexBuffers[i], bufferSize);
+            for (size_t i = 0; i < swapChainImages.size(); i++)
+            {
+
+                // create local memory buffer
+                createBuffer(bufferSize,
+                             VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                                 | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                             indexBuffers[iY].buffers[i],
+                             indexBuffers[iY].bufferMemories[i]);
+
+                copyBuffer(stagingBuffer, indexBuffers[iY].buffers[i],
+                           bufferSize);
+            }
         }
-
         vkDestroyBuffer(device, stagingBuffer, nullptr);
         vkFreeMemory(device, stagingBufferMemory, nullptr);
     }
@@ -1630,31 +1676,31 @@ private:
         VkMemoryPropertyFlags properties =
             deviceLocalImages ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : 0;
 
-        uint32_t texWidth = static_cast<uint32_t>(gwx);
-        uint32_t texHeight = static_cast<uint32_t>(gwy);
+        uint32_t texWidth = static_cast<uint32_t>(tex_size_s);
+        uint32_t texHeight = static_cast<uint32_t>(tex_size_t);
 
-        VkDeviceSize imageSize = texWidth * texHeight * 4;
+        VkDeviceSize imageSize = texWidth * texHeight * 4 * sizeof(float);
 
         createBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                          | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                      stagingBuffer, stagingBufferMemory);
 
-        for (size_t img_num = 0; img_num < textureImages.size(); img_num++ )
+        for (size_t target = 0; target < textureImages.size(); target++ )
         {
-            textureImages[img_num].images.resize(swapChainImages.size());
-            textureImages[img_num].imageMemories.resize(swapChainImages.size());
+            textureImages[target].images.resize(swapChainImages.size());
+            textureImages[target].imageMemories.resize(swapChainImages.size());
 
             for (size_t i = 0; i < swapChainImages.size(); i++)
             {
                 createShareableImage(
                     texWidth, texHeight, VK_FORMAT_R32G32B32A32_SFLOAT, tiling,
                     VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                    properties, textureImages[img_num].images[i], textureImages[img_num].imageMemories[i]
+                    properties, textureImages[target].images[i], textureImages[target].imageMemories[i]
                 );
                 if (useExternalMemory)
                 {
-                    transitionImageLayout(textureImages[img_num].images[i],
+                    transitionImageLayout(textureImages[target].images[i],
                                           VK_FORMAT_R32G32B32A32_SFLOAT,
                                           VK_IMAGE_LAYOUT_UNDEFINED,
                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -1927,7 +1973,7 @@ private:
         region.imageSubresource.mipLevel = 0;
         region.imageSubresource.baseArrayLayer = 0;
         region.imageSubresource.layerCount = 1;
-        region.imageOffset = { 0, 0, current_array_layer }; // array path
+        region.imageOffset = { 0, 0, 0 };
         region.imageExtent = { width, height, 1 };
 
         vkCmdCopyBufferToImage(commandBuffer, buffer, image,
@@ -1956,12 +2002,12 @@ private:
         VkPipelineStageFlags sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkPipelineStageFlags destinationStage =
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-            | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+            /*| VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR*/;
 
         if (src == VK_ACCESS_SHADER_READ_BIT)
         {
             sourceStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+                /*| VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR*/;
             destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         }
 
@@ -2030,7 +2076,7 @@ private:
             bufferInfo.offset = 0;
             bufferInfo.range = sizeof(UniformBufferObject);
 
-            std::array<VkWriteDescriptorSet, 2> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
 
             descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[0].dstSet = descriptorSets[i];
@@ -2040,13 +2086,13 @@ private:
             descriptorWrites[0].descriptorCount = 1;
             descriptorWrites[0].pImageInfo = &imageInfo[IOPT_DISPLACEMENT];
 
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = descriptorSets[i];
-            descriptorWrites[0].dstBinding = 1u;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pImageInfo = &imageInfo[IOPT_NORMAL_MAP];
+            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[1].dstSet = descriptorSets[i];
+            descriptorWrites[1].dstBinding = 1u;
+            descriptorWrites[1].dstArrayElement = 0;
+            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            descriptorWrites[1].descriptorCount = 1;
+            descriptorWrites[1].pImageInfo = &imageInfo[IOPT_NORMAL_MAP];
 
             descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             descriptorWrites[2].dstSet = descriptorSets[i];
@@ -2234,13 +2280,15 @@ private:
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(commandBuffers[i], 0, 1, &vertexBuffers[i], offsets);
 
-            vkCmdBindIndexBuffer(commandBuffers[i], indexBuffers[i], 0, VK_INDEX_TYPE_UINT16);
-
             vkCmdBindDescriptorSets(
                 commandBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS,
                 pipelineLayout, 0, 1, &descriptorSets[i], 0, nullptr);
 
-            vkCmdDrawIndexed(commandBuffers[i], static_cast<uint32_t>(inds.size()), 1, 0, 0, 0);
+            for ( auto ind_buffer : indexBuffers )
+            {
+                vkCmdBindIndexBuffer(commandBuffers[i], ind_buffer.buffers[i], 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(commandBuffers[i], static_cast<uint32_t>(inds.size()), 1, 0, 0, 0);
+            }
 
             vkCmdEndRenderPass(commandBuffers[i]);
 
@@ -2316,17 +2364,17 @@ private:
     void updateUniforms(uint32_t currentImage)
     {
         UniformBufferObject ubo = {};
-        ubo.ocean_size = NX;
+        ubo.ocean_size = mesh_size_x;
 
         // update camera related uniform
         glm::mat4 view_matrix = glm::lookAt(camera.eye, camera.eye + camera.dir, camera.up);
 
         float fov = glm::radians(60.0);
-        float aspect = gwx / (float)gwy;
-        glm::mat4 proj_matrix = glm::perspective(fov, aspect, 0.1f, 100.0f);
+        float aspect = (float)window_width / window_height;
+        glm::mat4 proj_matrix = glm::perspective(fov, aspect, 1.f, 2.f * mesh_size_x);
         proj_matrix[1][1] *= -1;
 
-        ubo.view_proj = view_matrix * proj_matrix;
+        ubo.view_proj_mat = proj_matrix * view_matrix;
 
         transitionUniformLayout(uniformBuffers[currentImage],
                                 VK_ACCESS_SHADER_READ_BIT,
@@ -2347,7 +2395,11 @@ private:
         updateUniforms(currentImage);
 
         int kernel_arg_ind=0;
-        for (size_t target=0; target<IOPT_COUNT; target++)
+
+// TODO - temporary hack to work with normal map
+//        for (size_t target=0; target<IOPT_COUNT; target++)
+size_t target_beg = IOPT_NORMAL_MAP;
+for (size_t target=target_beg; target<IOPT_COUNT; target++)
         {
             if (useExternalMemory)
             {
@@ -2362,17 +2414,18 @@ private:
         kernel.setArg(kernel_arg_ind, ci);
 
         cl::NDRange lws; // NullRange by default.
-        if (lwx > 0 && lwy > 0)
+        if (group_size_x > 0 && group_size_y > 0)
         {
-            lws = cl::NDRange{ lwx, lwy };
+            lws = cl::NDRange{ group_size_x, group_size_y };
         }
 
         commandQueue.enqueueNDRangeKernel(kernel, cl::NullRange,
-                                          cl::NDRange{ gwx, gwy }, lws);
+                                          cl::NDRange{ tex_size_s, tex_size_t }, lws);
 
         if (useExternalMemory)
         {
-            for (size_t target=0; target<IOPT_COUNT; target++)
+//            for (size_t target=0; target<IOPT_COUNT; target++)
+for (size_t target=target_beg; target<IOPT_COUNT; target++)
             {
                 commandQueue.enqueueReleaseExternalMemObjects(
                     { *mems[target][currentImage] });
@@ -2390,18 +2443,19 @@ private:
         }
         else
         {
-            for (size_t target=0; target<IOPT_COUNT; target++)
+//            for (size_t target=0; target<IOPT_COUNT; target++)
+for (size_t target=target_beg; target<IOPT_COUNT; target++)
             {
                 size_t rowPitch = 0;
                 void* pixels = commandQueue.enqueueMapImage(
                     *mems[target][currentImage], CL_TRUE, CL_MAP_READ, { 0, 0, 0 },
-                    { gwx, gwy, 1 }, &rowPitch, nullptr);
+                    { tex_size_s, tex_size_t, 1 }, &rowPitch, nullptr);
 
-                VkDeviceSize imageSize = gwx * gwy * 4;
+                VkDeviceSize imageSize = tex_size_s * tex_size_t * 4 * sizeof(float);
 
                 void* data;
                 vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
-                memcpy(data, pixels, static_cast<size_t>(imageSize));
+                    memcpy(data, pixels, static_cast<size_t>(imageSize));
                 vkUnmapMemory(device, stagingBufferMemory);
 
                 commandQueue.enqueueUnmapMemObject(*mems[target][currentImage], pixels);
@@ -2412,8 +2466,8 @@ private:
                                       VK_IMAGE_LAYOUT_UNDEFINED,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 copyBufferToImage(stagingBuffer, textureImages[target].images[currentImage],
-                                  static_cast<uint32_t>(gwx),
-                                  static_cast<uint32_t>(gwy));
+                                  static_cast<uint32_t>(tex_size_s),
+                                  static_cast<uint32_t>(tex_size_t));
                 transitionImageLayout(textureImages[target].images[currentImage],
                                       VK_FORMAT_R32G32B32A32_SFLOAT,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2783,7 +2837,6 @@ private:
 
     bool checkDeviceExtensionSupport(VkPhysicalDevice device)
     {
-
         VkPhysicalDeviceProperties pProperties;
         vkGetPhysicalDeviceProperties(device, &pProperties);
 
@@ -2990,6 +3043,12 @@ private:
     {
         auto app = (OceanApplication*)glfwGetWindowUserPointer(window);
         app->mouse_pos(pX, pY);
+    }
+
+    static void mouse_roll(GLFWwindow* window, double oX, double oY)
+    {
+        auto app = (OceanApplication*)glfwGetWindowUserPointer(window);
+        app->mouse_roll(oX, oY);
     }
 };
 
