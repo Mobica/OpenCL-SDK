@@ -51,6 +51,7 @@ all
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -80,51 +81,346 @@ all
 //    8) readme, szlify, PR
 
 
+const char *IGetErrorString(int clErrorCode)
+{
+    switch (clErrorCode)
+    {
+        case CL_SUCCESS: return "CL_SUCCESS";
+        case CL_DEVICE_NOT_FOUND: return "CL_DEVICE_NOT_FOUND";
+        case CL_DEVICE_NOT_AVAILABLE: return "CL_DEVICE_NOT_AVAILABLE";
+        case CL_COMPILER_NOT_AVAILABLE: return "CL_COMPILER_NOT_AVAILABLE";
+        case CL_MEM_OBJECT_ALLOCATION_FAILURE:
+            return "CL_MEM_OBJECT_ALLOCATION_FAILURE";
+        case CL_OUT_OF_RESOURCES: return "CL_OUT_OF_RESOURCES";
+        case CL_OUT_OF_HOST_MEMORY: return "CL_OUT_OF_HOST_MEMORY";
+        case CL_PROFILING_INFO_NOT_AVAILABLE:
+            return "CL_PROFILING_INFO_NOT_AVAILABLE";
+        case CL_MEM_COPY_OVERLAP: return "CL_MEM_COPY_OVERLAP";
+        case CL_IMAGE_FORMAT_MISMATCH: return "CL_IMAGE_FORMAT_MISMATCH";
+        case CL_IMAGE_FORMAT_NOT_SUPPORTED:
+            return "CL_IMAGE_FORMAT_NOT_SUPPORTED";
+        case CL_BUILD_PROGRAM_FAILURE: return "CL_BUILD_PROGRAM_FAILURE";
+        case CL_MAP_FAILURE: return "CL_MAP_FAILURE";
+        case CL_MISALIGNED_SUB_BUFFER_OFFSET:
+            return "CL_MISALIGNED_SUB_BUFFER_OFFSET";
+        case CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST:
+            return "CL_EXEC_STATUS_ERROR_FOR_EVENTS_IN_WAIT_LIST";
+        case CL_COMPILE_PROGRAM_FAILURE: return "CL_COMPILE_PROGRAM_FAILURE";
+        case CL_LINKER_NOT_AVAILABLE: return "CL_LINKER_NOT_AVAILABLE";
+        case CL_LINK_PROGRAM_FAILURE: return "CL_LINK_PROGRAM_FAILURE";
+        case CL_DEVICE_PARTITION_FAILED: return "CL_DEVICE_PARTITION_FAILED";
+        case CL_KERNEL_ARG_INFO_NOT_AVAILABLE:
+            return "CL_KERNEL_ARG_INFO_NOT_AVAILABLE";
+        case CL_INVALID_VALUE: return "CL_INVALID_VALUE";
+        case CL_INVALID_DEVICE_TYPE: return "CL_INVALID_DEVICE_TYPE";
+        case CL_INVALID_DEVICE: return "CL_INVALID_DEVICE";
+        case CL_INVALID_CONTEXT: return "CL_INVALID_CONTEXT";
+        case CL_INVALID_QUEUE_PROPERTIES: return "CL_INVALID_QUEUE_PROPERTIES";
+        case CL_INVALID_COMMAND_QUEUE: return "CL_INVALID_COMMAND_QUEUE";
+        case CL_INVALID_HOST_PTR: return "CL_INVALID_HOST_PTR";
+        case CL_INVALID_MEM_OBJECT: return "CL_INVALID_MEM_OBJECT";
+        case CL_INVALID_IMAGE_FORMAT_DESCRIPTOR:
+            return "CL_INVALID_IMAGE_FORMAT_DESCRIPTOR";
+        case CL_INVALID_IMAGE_SIZE: return "CL_INVALID_IMAGE_SIZE";
+        case CL_INVALID_SAMPLER: return "CL_INVALID_SAMPLER";
+        case CL_INVALID_BINARY: return "CL_INVALID_BINARY";
+        case CL_INVALID_BUILD_OPTIONS: return "CL_INVALID_BUILD_OPTIONS";
+        case CL_INVALID_PLATFORM: return "CL_INVALID_PLATFORM";
+        case CL_INVALID_PROGRAM: return "CL_INVALID_PROGRAM";
+        case CL_INVALID_PROGRAM_EXECUTABLE:
+            return "CL_INVALID_PROGRAM_EXECUTABLE";
+        case CL_INVALID_KERNEL_NAME: return "CL_INVALID_KERNEL_NAME";
+        case CL_INVALID_KERNEL_DEFINITION:
+            return "CL_INVALID_KERNEL_DEFINITION";
+        case CL_INVALID_KERNEL: return "CL_INVALID_KERNEL";
+        case CL_INVALID_ARG_INDEX: return "CL_INVALID_ARG_INDEX";
+        case CL_INVALID_ARG_VALUE: return "CL_INVALID_ARG_VALUE";
+        case CL_INVALID_ARG_SIZE: return "CL_INVALID_ARG_SIZE";
+        case CL_INVALID_KERNEL_ARGS: return "CL_INVALID_KERNEL_ARGS";
+        case CL_INVALID_WORK_DIMENSION: return "CL_INVALID_WORK_DIMENSION";
+        case CL_INVALID_WORK_GROUP_SIZE: return "CL_INVALID_WORK_GROUP_SIZE";
+        case CL_INVALID_WORK_ITEM_SIZE: return "CL_INVALID_WORK_ITEM_SIZE";
+        case CL_INVALID_GLOBAL_OFFSET: return "CL_INVALID_GLOBAL_OFFSET";
+        case CL_INVALID_EVENT_WAIT_LIST: return "CL_INVALID_EVENT_WAIT_LIST";
+        case CL_INVALID_EVENT: return "CL_INVALID_EVENT";
+        case CL_INVALID_OPERATION: return "CL_INVALID_OPERATION";
+        case CL_INVALID_GL_OBJECT: return "CL_INVALID_GL_OBJECT";
+        case CL_INVALID_BUFFER_SIZE: return "CL_INVALID_BUFFER_SIZE";
+        case CL_INVALID_MIP_LEVEL: return "CL_INVALID_MIP_LEVEL";
+        case CL_INVALID_GLOBAL_WORK_SIZE: return "CL_INVALID_GLOBAL_WORK_SIZE";
+        case CL_INVALID_PROPERTY: return "CL_INVALID_PROPERTY";
+        case CL_INVALID_IMAGE_DESCRIPTOR: return "CL_INVALID_IMAGE_DESCRIPTOR";
+        case CL_INVALID_COMPILER_OPTIONS: return "CL_INVALID_COMPILER_OPTIONS";
+        case CL_INVALID_LINKER_OPTIONS: return "CL_INVALID_LINKER_OPTIONS";
+        case CL_INVALID_DEVICE_PARTITION_COUNT:
+            return "CL_INVALID_DEVICE_PARTITION_COUNT";
+        case CL_INVALID_PIPE_SIZE: return "CL_INVALID_PIPE_SIZE";
+        case CL_INVALID_DEVICE_QUEUE: return "CL_INVALID_DEVICE_QUEUE";
+        case CL_INVALID_SPEC_ID: return "CL_INVALID_SPEC_ID";
+        case CL_MAX_SIZE_RESTRICTION_EXCEEDED:
+            return "CL_MAX_SIZE_RESTRICTION_EXCEEDED";
+        default: return "(unknown)";
+    }
+}
+
+#define print_error(errCode, msg)                                              \
+    printf("ERROR: %s! (%s from %s:%d)\n", msg, IGetErrorString(errCode),   \
+              __FILE__, __LINE__);
+
+#define test_error(errCode, msg)                                               \
+    {                                                                          \
+        auto errCodeResult = errCode;                                          \
+        if (errCodeResult != CL_SUCCESS)                                       \
+        {                                                                      \
+            print_error(errCodeResult, msg);                                   \
+            return errCode;                                                    \
+        }                                                                      \
+    }
 
 namespace {
 
-const char kernelString[] =
+const char init_spectrum_kernel_str[] =
+R"CLC(
+constant float PI = 3.14159265359f;
+constant float g = 9.81f;
+constant float KM = 370.f;
+constant float CM = 0.23f;
+constant float gamma = 1.7f;
+constant float Omega = 0.84f;
+constant float sqrt_10 = 3.16227766f;
 
-R"CLC(kernel void Julia( write_only image2d_t dst, float cr, float ci )
+float omega(float k)
 {
-    const float cMinX = -1.5f;
-    const float cMaxX =  1.5f;
-    const float cMinY = -1.5f;
-    const float cMaxY =  1.5f;
+	return sqrt(g * k * (1.f + ((k * k) / (KM * KM))));
+}
 
-    const int cWidth = get_global_size(0);
-    const int cHeight = get_global_size(1);
-    const int cIterations = 16;
+float square(float x)
+{
+	return x * x;
+}
 
-    int x = (int)get_global_id(0);
-    int y = (int)get_global_id(1);
+// patch_info.x - ocean patch size
+// patch_info.y - ocean texture unified resolution
 
-    float a = x * ( cMaxX - cMinX ) / cWidth + cMinX;
-    float b = y * ( cMaxY - cMinY ) / cHeight + cMinY;
+__kernel void init_spectrum( int2 patch_info, float2 wind, write_only image2d_t dst )
+{
+	int2 uv = (int2)((int)get_global_id(0), (int)get_global_id(1));
+	int res = patch_info.y;
+	float n = (uv.x < 0.5f * res) ? uv.x : uv.x - res;
+	float m = (uv.y < 0.5f * res) ? uv.y : uv.y - res;
+	float2 wave_vector = (2.f * PI * (float2)(n, m)) / patch_info.x;
+	float k = length(wave_vector);
 
-    float result = 0.0f;
-    const float thresholdSquared = cIterations * cIterations / 64.0f;
+	float U10 = length(wind);
+	float kp = g * square(Omega / U10);
 
-    for( int i = 0; i < cIterations; i++ ) {
-        float aa = a * a;
-        float bb = b * b;
+	float c = omega(k) / k;
+	float cp = omega(kp) / kp;
 
-        float magnitudeSquared = aa + bb;
-        if( magnitudeSquared >= thresholdSquared ) {
-            break;
-        }
+	float Lpm = exp(-1.25f * square(kp / k));
+	float sigma = 0.08f * (1.f + 4.f * pow(Omega, -3.f));
+	float Gamma = exp(-square(sqrt(k / kp) - 1.f) / 2.f * square(sigma));
+	float Jp = pow(gamma, Gamma);
+	float Fp = Lpm * Jp * exp(-Omega / sqrt_10 * (sqrt(k / kp) - 1.0));
+	float alphap = 0.006 * sqrt(Omega);
+	float Bl = 0.5 * alphap * cp / c * Fp;
 
-        result += 1.0f / cIterations;
-        b = 2 * a * b + ci;
-        a = aa - bb + cr;
-    }
+	float z0 = 0.000037 * square(U10) / g * pow(U10 / cp, 0.9f);
+	float uStar = 0.41 * U10 / log(10.0 / z0);
+	float alpham = 0.01 * ((uStar < CM) ? (1.0 + log(uStar / CM)) : (1.0 + 3.0 * log(uStar / CM)));
+	float Fm = exp(-0.25 * square(k / KM - 1.0));
+	float Bh = 0.5 * alpham * CM / c * Fm * Lpm;
 
-    result = max( result, 0.0f );
-    result = min( result, 1.0f );
+	float a0 = log(2.f) / 4.f;
+	float am = 0.13 * uStar / CM;
+	float Delta = tanh(a0 + 4.f * pow(c / cp, 2.5f) + am * pow(CM / c, 2.5f));
 
-    // RGBA
-    float4 color = (float4)(result + 0.6f, result, result * result, 1.0f);
-    write_imagef(dst, (int2)(x, y), color);
+	float cosPhi = dot(normalize(wind), normalize(wave_vector));
+
+	float S = (1.f / (2.f * PI)) * pow(k, -4.f) * (Bl + Bh) * (1.f + Delta * (2.f * cosPhi * cosPhi - 1.f));
+
+	float dk = 2.f * PI / patch_info.x;
+	float h = sqrt(S / 2.f) * dk;
+
+	if (wave_vector.x == 0.0 && wave_vector.y == 0.0) h = 0.f;
+	write_imagef(dst, uv, (float4)(h, 0.f, 0.f, 0.f));
+}
+)CLC";
+
+
+const char phase_kernel_str[] =
+R"CLC(
+
+constant float PI = 3.14159265359;
+constant float g = 9.81;
+constant float KM = 370.0;
+constant sampler_t sampler = CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;
+
+float omega(float k)
+{
+	return sqrt(g * k * (1.0 + k * k / KM * KM));
+}
+
+__kernel void phase( float dt, int2 patch_info, read_only image2d_t src, write_only image2d_t dst )
+{
+	int2 uv = (int2)((int)get_global_id(0), (int)get_global_id(1));
+	int res = patch_info.y;
+	float n = (uv.x < 0.5f * res) ? uv.x : uv.x - res;
+	float m = (uv.y < 0.5f * res) ? uv.y : uv.y - res;
+	float2 wave_vector = (2.f * PI * (float2)(n, m)) / patch_info.x;
+	float k = length(wave_vector);
+
+	float delta_phase = omega(k) * dt;
+	float phase = read_imagef(src, sampler, uv).x;
+	phase = fmod(phase + delta_phase, 2.f * PI);
+
+	write_imagef(dst, uv, (float4)(phase, 0.f, 0.f, 0.f));
+}
+)CLC";
+
+const char spectrum_kernel_str[] =
+
+    R"CLC(
+constant float PI = 3.14159265359f;
+constant float g = 9.81f;
+constant float KM = 370.f;
+
+constant sampler_t sampler = CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;
+
+float2 multiplyComplex(float2 a, float2 b)
+{
+	return (float2)(a[0] * b[0] - a[1] * b[1], a[1] * b[0] + a[0] * b[1]);
+}
+
+float2 multiplyByI(float2 z)
+{
+	return (float2)(-z[1], z[0]);
+}
+
+__kernel void spectrum(
+		float choppiness,
+		int2 patch_info,
+		read_only image2d_t phases,
+		read_only image2d_t initial_spectrum,
+		write_only image2d_t dst )
+{
+	int2 uv = (int2)((int)get_global_id(0), (int)get_global_id(1));
+	int res = patch_info.y;
+	float n = (uv.x < 0.5f * res) ? uv.x : uv.x - res;
+	float m = (uv.y < 0.5f * res) ? uv.y : uv.y - res;
+	float2 wave_vector = (2.f * PI * (float2)(n, m)) / patch_info.x;
+
+	float phase = read_imagef(phases, sampler, uv).x;
+	float2 phase_vector = (float2)(cos(phase), sin(phase));
+
+	int2 uv_i = (int2)((res - uv.x)%(res-1), (res - uv.y)%(res-1));
+	float2 h0p = (float2)(read_imagef(initial_spectrum, sampler, uv).x, 0.f);
+	float2 h0m = (float2)(read_imagef(initial_spectrum, sampler, uv_i).x, 0.f);
+	h0m.y *= -1.f;
+
+	float2 h = multiplyComplex(h0p, phase_vector) +
+		multiplyComplex(h0m, (float2)(phase_vector.x, -phase_vector.y));
+
+	float2 hX = -multiplyByI(h * (wave_vector.x / length(wave_vector))) * choppiness;
+	float2 hZ = -multiplyByI(h * (wave_vector.y / length(wave_vector))) * choppiness;
+
+	// No DC term
+	if (wave_vector.x == 0.0 && wave_vector.y == 0.0)
+	{
+		h = (float2)(0.f, 0.f);
+		hX = (float2)(0.f, 0.f);
+		hZ = (float2)(0.f, 0.f);
+	}
+
+	hX += multiplyByI(h);
+
+	write_imagef(dst, uv, (float4)(hX.x, hX.y, hZ.x, hZ.y));
+}
+)CLC";
+
+const char ifft_kernel_str[] =
+
+R"CLC(
+constant float PI = 3.14159265359f;
+constant sampler_t sampler = CLK_ADDRESS_REPEAT | CLK_FILTER_LINEAR;
+
+float2 MultiplyComplex(float2 a, float2 b)
+{
+	return (float2)(a[0] * b[0] - a[1] * b[1], a[1] * b[0] + a[0] * b[1]);
+}
+
+float4 ButterflyOperation(float2 a, float2 b, float2 twiddle)
+{
+	float2 twiddle_b = MultiplyComplex(twiddle, b);
+	float4 result = (float4)(a + twiddle_b, a - twiddle_b);
+	return result;
+}
+
+// mode.x - 0-horizontal, 1-vertical
+// mode.y - subsequent count
+
+__kernel void ifft_1D( int2 mode, int2 patch_info, read_only image2d_t src, write_only image2d_t dst )
+{
+	int auv[2];
+	auv[mode.x] = get_local_id( 0 );
+	auv[(mode.x+1)%2] = get_group_id( 0 );
+
+	int2 uv = (int2)(auv[0], auv[1]);
+
+	int thread_count[2];
+	thread_count[mode.x] = (int)(patch_info.y * 0.5f);
+	thread_count[(mode.x+1)%2] = 0;
+
+	int thread_idx = get_local_id( 0 );
+
+	int in_idx = thread_idx & (mode.y - 1);
+	int out_idx = ((thread_idx - in_idx) << 1) + in_idx;
+
+	float angle = -PI * ((float)(in_idx) / (float)(mode.y));
+	float2 twiddle = (float2)(cos(angle), sin(angle));
+
+	float4 a = read_imagef(src, sampler, uv);
+	float4 b = read_imagef(src, sampler, (int2)(uv.x + thread_count[0], uv.y + thread_count[1]));
+
+	// Transforming two complex sequences independently and simultaneously
+
+	float4 result0 = ButterflyOperation(a.xy, b.xy, twiddle);
+	float4 result1 = ButterflyOperation(a.zw, b.zw, twiddle);
+
+	auv[0] = uv.x;
+	auv[1] = uv.y;
+	auv[mode.x] = out_idx;
+
+	write_imagef(dst, (int2)(auv[0], auv[1]), (float4)(result0.xy, result1.xy));
+	write_imagef(dst, (int2)(auv[0] + mode.y, auv[1]), (float4)(result0.zw, result1.zw));
+}
+)CLC";
+
+
+const char normals_kernel_str[] =
+
+    R"CLC(
+constant sampler_t sampler = CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;
+
+__kernel void normals( int2 patch_info, read_only image2d_t src, write_only image2d_t dst )
+{
+	int2 uv = (int2)((int)get_global_id(0), (int)get_global_id(1));
+
+	float texel = 1.f / patch_info.y;
+	float texel_size = patch_info.x * texel;
+
+	float3 center = read_imagef(src, sampler, uv).xyz;
+	float3 right = (float3)(texel_size, 0.f, 0.f) + read_imagef(src, sampler, (int2)(clamp(uv.x + 1, 0, patch_info.y - 1), uv.y)).xyz - center;
+	float3 left = (float3)(-texel_size, 0.f, 0.f) + read_imagef(src, sampler, (int2)(clamp(uv.x - 1, 0, patch_info.y - 1), uv.y)).xyz - center;
+	float3 top = (float3)(0.f, 0.f, -texel_size) + read_imagef(src, sampler, (int2)(uv.x, clamp(uv.y - 1, 0, patch_info.y - 1))).xyz - center;
+	float3 bottom = (float3)(0.f, 0.f, texel_size) + read_imagef(src, sampler, (int2)(uv.x, clamp(uv.y + 1, 0, patch_info.y - 1))).xyz - center;
+
+	float3 top_right = cross(right, top);
+	float3 top_left = cross(top, left);
+	float3 bottom_left = cross(left, bottom);
+	float3 bottom_right = cross(bottom, right);
+
+	write_imagef(dst, uv, (float4)(normalize(top_right + top_left + bottom_right + bottom_left), 1.f));
 }
 )CLC";
 
@@ -237,13 +533,13 @@ struct Vertex {
 
 struct Camera
 {
-    glm::vec3 eye = glm::vec3(0.0f, 0.0f, 0.0f);
-    glm::vec3 dir = glm::vec3(0.0f, 0.0f, -1.0f);
+    glm::vec3 eye = glm::vec3(0.0f, 0.0f, 2.0f);
+    glm::vec3 dir = glm::normalize(glm::vec3(0.0f, -1.0f, -1.0f));
     glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
     glm::vec3 rvec = glm::vec3(1.0f, 0.0f, 0.0f);
     glm::vec2 begin = glm::vec2(-1.0f, -1.0f);
-    float yaw = -90.0f;
-    float pitch = 0.0f;
+    float yaw = 0.0f;
+    float pitch = -45.0f;
     bool drag = false;
 };
 
@@ -267,29 +563,36 @@ private:
     GLFWwindow* window;
     Camera camera;
 
-    bool animate = false;
-    bool redraw = false;
-
-    // mesh patch size
-    size_t mesh_size_x = 1024;
-    size_t mesh_size_y = 1024;
+    // mesh patch size - assume uniform x/y
+    size_t ocean_patch_size = 1024;
 
     // mesh patch spacing
     float mesh_spacing_x = 1.f;
     float mesh_spacing_y = 1.f;
 
-    // ocean texture patch size
-    size_t tex_size_s = 512;
-    size_t tex_size_t = 512;
+    // ocean texture patch size - assume uniform x/y
+    // keep it even to avoid passing incomplete spectrum to final shader
+    size_t ocean_tex_size = 512;
 
-    size_t group_size_x = 0;
-    size_t group_size_y = 0;
+    size_t group_size = 32;
 
-    size_t window_width = 512;
-    size_t window_height = 512;
+    size_t window_width = 1024;
+    size_t window_height = 1024;
 
-    float cr = -0.123f;
-    float ci = 0.745f;
+
+    bool animate = false;
+    bool redraw = false;
+
+    // ocean parameters changed - rebuild initial spectrum resources
+    bool    changed = true;
+
+    float   wind_magnitude = 14.142135f;
+    float   wind_angle = 45.f;
+    float   choppiness = 1.5f;
+    int     sun_elevation = 0;
+    int     sun_azimuth = 90;
+    bool    wireframe_mode = false;
+    bool    is_ping_phase = true;
 
     bool vsync = true;
     size_t startFrame = 0;
@@ -344,7 +647,9 @@ private:
         std::vector<VkImageView> imageViews;
     };
 
-    // 0 - displacement map, 1 - normal map
+    // vulkan-opencl interoperability resources
+    // 0 - displacement ping map, 1 - displacement pong map, 2 - normal map
+    // both displacement map work as spectrum computation result in terms of IFFT
     std::array<TextureOCL, IOPT_COUNT> textureImages;
 
     // Ocean grid vertices and related buffers
@@ -392,25 +697,43 @@ private:
     bool useExternalMemory = true;
     bool useExternalSemaphore = true;
 
-
-    // OpenCL stuff
+    // OpenCL resources
     cl_external_memory_handle_type_khr externalMemType = 0;
 
     cl::Context context;
     cl::CommandQueue commandQueue;
+
+    // final kernel to compute spectrum and related normal map
     cl::Kernel kernel;
 
-    // IFFT intermediate computation storages
-    std::unique_ptr<cl::Image> h0pk;
-    std::unique_ptr<cl::Image> h0mk;
-    std::unique_ptr<cl::Image> hkt_ping_pong[2];
-    std::unique_ptr<cl::Image> phase_pingpong[2];
+    // initial spectrum kernel
+    cl::Kernel init_spectrum_kernel;
+
+    // Fourier components image kernel
+    cl::Kernel phase_kernel;
+
+    // Spectrum image kernel
+    cl::Kernel spectrum_kernel;
+
+    // IFFT kernel
+    cl::Kernel ifft_kernel;
+
+    // building normals kernel
+    cl::Kernel normals_kernel;
+
+
+    // IFFT intermediate computation storages without vulkan iteroperability
+    std::unique_ptr<cl::Image2D> init_spectrum_mem;
+    std::unique_ptr<cl::Image2D> phase_pingpong_mem[2];
+    std::unique_ptr<cl::Image2D> displacement_swap_mem;
 
     size_t ocl_max_img2d_width;
     cl_ulong ocl_max_alloc_size, ocl_mem_size;
 
-    // final computation result with displacements and normal map, needs to follow swap-chain scheme
-    std::array<std::vector<std::unique_ptr<cl::Image>>, IOPT_COUNT> mems;
+    // opencl-vulkan iteroperability resources
+    // final computation result with displacements and normal map,
+    // needs to follow swap-chain scheme
+    std::array<std::vector<std::unique_ptr<cl::Image2D>>, IOPT_COUNT> mems;
     std::vector<cl::Semaphore> signalSemaphores;
 
     clEnqueueAcquireExternalMemObjectsKHR_fn
@@ -451,12 +774,9 @@ private:
             "", "window_height", "Window height", window_height, &window_height);
 
         op.add<popl::Value<size_t>>(
-            "", "tex_size_s", "Ocean patch size X AKA global work size", tex_size_s, &tex_size_s);
-        op.add<popl::Value<size_t>>(
-            "", "tex_size_t", "Ocean patch size Y AKA global work size", tex_size_t, &tex_size_t);
+            "", "ocean_tex_size", "Ocean patch size (uniform) AKA global work size", ocean_tex_size, &ocean_tex_size);
 
-        op.add<popl::Value<size_t>>("", "group_size_x", "Local Work Size X", group_size_x, &group_size_x);
-        op.add<popl::Value<size_t>>("", "group_size_y", "Local Work Size Y", group_size_y, &group_size_y);
+        op.add<popl::Value<size_t>>("", "group_size", "Local Work Size (uniform)", group_size, &group_size);
         op.add<popl::Switch>("", "immediate",
                              "Prefer VK_PRESENT_MODE_IMMEDIATE_KHR (no vsync)",
                              &immediate);
@@ -575,92 +895,140 @@ private:
         context = cl::Context{ devices[deviceIndex] };
         commandQueue = cl::CommandQueue{ context, devices[deviceIndex] };
 
-        cl::Program program{ context, kernelString };
-
-        try
+        auto build_opencl_kernel = [&](const char * source, cl::Kernel & kernel, const char * name)
         {
-            program.build();
-        } catch (const cl::BuildError& e)
-        {
-            auto bl = e.getBuildLog();
-            printf("Build OpenCL kernel error: \n");
-            for (auto elem : bl) printf("%s\n", elem.second.c_str());
-            exit(1);
-        }
+            cl::Program program{ context, source };
 
-        kernel = cl::Kernel{ program, "Julia" };
+            try
+            {
+                program.build();
+            }
+            catch (const cl::BuildError& e)
+            {
+                auto bl = e.getBuildLog();
+                printf("Build OpenCL %s kernel error: \n", name);
+                for (auto elem : bl) printf("%s\n", elem.second.c_str());
+                exit(1);
+            }
+
+            kernel = cl::Kernel{ program, name };
+        };
+
+        build_opencl_kernel(init_spectrum_kernel_str, init_spectrum_kernel, "init_spectrum");
+        build_opencl_kernel(phase_kernel_str, phase_kernel, "phase");
+        build_opencl_kernel(spectrum_kernel_str, spectrum_kernel, "spectrum");
+        build_opencl_kernel(ifft_kernel_str, ifft_kernel, "ifft_1D");
+        build_opencl_kernel(normals_kernel_str, normals_kernel, "normals");
     }
 
     void initOpenCLMems()
     {
-        for (size_t target = 0; target < IOPT_COUNT; target++)
+        // init intermediate opencl resources
+        try
         {
-            mems[target].resize(swapChainImages.size());
+            init_spectrum_mem = std::make_unique<cl::Image2D>(
+                context, CL_MEM_READ_WRITE, cl::ImageFormat(CL_R, CL_FLOAT),
+                ocean_tex_size, ocean_tex_size);
 
-            for (size_t img_num = 0; img_num < textureImages.size(); img_num++)
+            std::vector<float> ping_phase_array(ocean_tex_size
+                                                * ocean_tex_size);
+            std::random_device dev;
+            std::mt19937 rng(dev());
+            std::uniform_real_distribution<float> dist(0.f, 1.f);
+
+            for (size_t i = 0; i < ping_phase_array.size(); ++i)
+                ping_phase_array[i] = dist(rng) * 2.f * M_PI;
+
+            phase_pingpong_mem[0] = std::make_unique<cl::Image2D>(
+                context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                cl::ImageFormat(CL_R, CL_FLOAT), ocean_tex_size, ocean_tex_size,
+                0, ping_phase_array.data());
+
+            phase_pingpong_mem[1] = std::make_unique<cl::Image2D>(
+                context, CL_MEM_READ_WRITE, cl::ImageFormat(CL_R, CL_FLOAT),
+                ocean_tex_size, ocean_tex_size);
+
+            displacement_swap_mem = std::make_unique<cl::Image2D>(
+                context, CL_MEM_READ_WRITE, cl::ImageFormat(CL_RGBA, CL_FLOAT),
+                ocean_tex_size, ocean_tex_size);
+
+            for (size_t target = 0; target < IOPT_COUNT; target++)
             {
-                for (size_t i = 0; i < swapChainImages.size(); i++)
+                mems[target].resize(swapChainImages.size());
+
+                for (size_t img_num = 0; img_num < textureImages.size();
+                     img_num++)
                 {
-                    if (useExternalMemory)
+                    for (size_t i = 0; i < swapChainImages.size(); i++)
                     {
+                        if (useExternalMemory)
+                        {
 #ifdef _WIN32
-                        HANDLE handle = NULL;
-                        VkMemoryGetWin32HandleInfoKHR getWin32HandleInfo{};
-                        getWin32HandleInfo.sType =
-                            VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
-                        getWin32HandleInfo.memory =
-                            textureImages[img_num].imageMemories[i];
-                        getWin32HandleInfo.handleType =
-                            VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
-                        vkGetMemoryWin32HandleKHR(device, &getWin32HandleInfo,
-                                                  &handle);
+                            HANDLE handle = NULL;
+                            VkMemoryGetWin32HandleInfoKHR getWin32HandleInfo{};
+                            getWin32HandleInfo.sType =
+                                VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
+                            getWin32HandleInfo.memory =
+                                textureImages[img_num].imageMemories[i];
+                            getWin32HandleInfo.handleType =
+                                VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+                            vkGetMemoryWin32HandleKHR(
+                                device, &getWin32HandleInfo, &handle);
 
-                        const cl_mem_properties props[] = {
-                            externalMemType,
-                            (cl_mem_properties)handle,
-                            0,
-                        };
+                            const cl_mem_properties props[] = {
+                                externalMemType,
+                                (cl_mem_properties)handle,
+                                0,
+                            };
 #elif defined(__linux__)
-                        int fd = 0;
-                        VkMemoryGetFdInfoKHR getFdInfo{};
-                        getFdInfo.sType =
-                            VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-                        getFdInfo.memory =
-                            textureImages[img_num]
-                                .imageMemories[i]; // textureImageMemories[i];
-                        getFdInfo.handleType = externalMemType
-                                == CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_FD_KHR
-                            ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
-                            : VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-                        vkGetMemoryFdKHR(device, &getFdInfo, &fd);
+                            int fd = 0;
+                            VkMemoryGetFdInfoKHR getFdInfo{};
+                            getFdInfo.sType =
+                                VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+                            getFdInfo.memory =
+                                textureImages[img_num].imageMemories
+                                    [i]; // textureImageMemories[i];
+                            getFdInfo.handleType = externalMemType
+                                    == CL_EXTERNAL_MEMORY_HANDLE_OPAQUE_FD_KHR
+                                ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
+                                : VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                            vkGetMemoryFdKHR(device, &getFdInfo, &fd);
 
-                        const cl_mem_properties props[] = {
-                            externalMemType,
-                            (cl_mem_properties)fd,
-                            0,
-                        };
+                            const cl_mem_properties props[] = {
+                                externalMemType,
+                                (cl_mem_properties)fd,
+                                0,
+                            };
 #else
-                        const cl_mem_properties* props = NULL;
+                            const cl_mem_properties* props = NULL;
 #endif
 
-                        cl::vector<cl_mem_properties> vprops(
-                            sizeof(props) / sizeof(props[0]));
-                        std::memcpy(vprops.data(), props,
-                                    sizeof(cl_mem_properties) * vprops.size());
+                            cl::vector<cl_mem_properties> vprops(
+                                sizeof(props) / sizeof(props[0]));
+                            std::memcpy(vprops.data(), props,
+                                        sizeof(cl_mem_properties)
+                                            * vprops.size());
 
-                        mems[target][i].reset(new cl::Image2D(
-                            context, vprops, CL_MEM_WRITE_ONLY,
-                            cl::ImageFormat(CL_RGBA, CL_FLOAT), tex_size_s, tex_size_t));
-                    }
-                    else
-                    {
-                        mems[target][i].reset(new cl::Image2D{
-                            context, CL_MEM_WRITE_ONLY,
-                            cl::ImageFormat{ CL_RGBA, CL_FLOAT }, tex_size_s,
-                            tex_size_t });
+                            mems[target][i].reset(new cl::Image2D(
+                                context, vprops, CL_MEM_READ_WRITE,
+                                cl::ImageFormat(CL_RGBA, CL_FLOAT),
+                                ocean_tex_size, ocean_tex_size));
+                        }
+                        else
+                        {
+                            mems[target][i].reset(new cl::Image2D{
+                                context, CL_MEM_READ_WRITE,
+                                cl::ImageFormat{ CL_RGBA, CL_FLOAT },
+                                ocean_tex_size, ocean_tex_size });
+                        }
                     }
                 }
             }
+        } catch (const cl::Error& e)
+        {
+            printf("initOpenCLMems: OpenCL %s image error: %s\n", e.what(),
+                   IGetErrorString(e.err()));
+            exit(1);
         }
     }
 
@@ -741,11 +1109,16 @@ private:
                     printf("animation is %s\n", animate ? "ON" : "OFF");
                     break;
 
-                case GLFW_KEY_A: cr += 0.005f; break;
-                case GLFW_KEY_Z: cr -= 0.005f; break;
+                case GLFW_KEY_A: wind_magnitude += 0.005f; changed = true; break;
+                case GLFW_KEY_Z: wind_magnitude -= 0.005f; changed = true; break;
 
-                case GLFW_KEY_S: ci += 0.005f; break;
-                case GLFW_KEY_X: ci -= 0.005f; break;
+                case GLFW_KEY_S: wind_angle += 1.f; changed = true; break;
+                case GLFW_KEY_X: wind_angle -= 1.f; changed = true; break;
+
+                case GLFW_KEY_D: choppiness += 0.01f; break;
+                case GLFW_KEY_C: choppiness -= 0.01f; break;
+
+                case GLFW_KEY_W: wireframe_mode = !wireframe_mode; break;
             }
         }
     }
@@ -778,13 +1151,16 @@ private:
 
         camera.yaw -= off.x * DRAG_SPEED_FAC;
         camera.pitch += off.y * DRAG_SPEED_FAC;
-        glm::vec3 dir(
-            cos(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch)),
-            sin(glm::radians(camera.pitch)),
-            sin(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch)));
+
+        glm::quat yaw (glm::cos(glm::radians(camera.yaw/2)), glm::vec3(0, 0, 1) * glm::sin(glm::radians(camera.yaw/2)));
+        glm::quat pitch (glm::cos(glm::radians(camera.pitch/2)), glm::vec3(1, 0, 0) * glm::sin(glm::radians(camera.pitch/2)));
+        glm::mat3 rot_mat ( yaw * pitch );
+        glm::vec3 dir = rot_mat * glm::vec3(0, 0, -1);
+
+//        tu skonczylem, buduja sie kernele i mozemy ogladac tekstury na quadzie - widac jakies bledy w geometrii albo na wsp. tekstur
 
         camera.dir = glm::normalize(dir);
-        camera.rvec = glm::normalize(glm::cross(camera.dir, glm::vec3(0, 1, 0)));
+        camera.rvec = glm::normalize(glm::cross(camera.dir, glm::vec3(0, 0, 1)));
         camera.up = glm::normalize(glm::cross(camera.rvec, camera.dir));
     }
 
@@ -1522,20 +1898,20 @@ private:
 
     void createVertexBuffers() {
 
-        int iCXY = ( mesh_size_x + 1 ) * ( mesh_size_y + 1 );
+        int iCXY = ( ocean_patch_size + 1 ) * ( ocean_patch_size + 1 );
         verts.resize(iCXY);
 
         // Initialize vertices and normals to default (row, column, 0) and (0,
         // 0, 1) This step is not really neccessary (its just in case something
         // went wrong) Verts and normals will be updated with wave height field
         // every frame
-        cl_float dfY = -0.5 * (mesh_size_y * mesh_spacing_y), dfBaseX = -0.5 * (mesh_size_x * mesh_spacing_x);
-        cl_float tx=0.f, ty=0.f, dtx = 1.f / mesh_size_x, dty= 1.f / mesh_size_y;
-        for (int iBase = 0, iY = 0; iY <= mesh_size_y; iY++, iBase += mesh_size_x + 1)
+        cl_float dfY = -0.5 * (ocean_patch_size * mesh_spacing_y), dfBaseX = -0.5 * (ocean_patch_size * mesh_spacing_x);
+        cl_float tx=0.f, ty=0.f, dtx = 1.f / ocean_patch_size, dty= 1.f / ocean_patch_size;
+        for (int iBase = 0, iY = 0; iY <= ocean_patch_size; iY++, iBase += ocean_patch_size + 1)
         {
             tx=0.f;
             double dfX = dfBaseX;
-            for (int iX = 0; iX <= mesh_size_x; iX++)
+            for (int iX = 0; iX <= ocean_patch_size; iX++)
             {
                 verts[iBase + iX].pos = glm::vec3(dfX, dfY, 0.0);
                 verts[iBase + iX].tc = glm::vec2(tx, ty);
@@ -1618,9 +1994,9 @@ private:
 
     void createIndexBuffers()
     {
-        indexBuffers.resize(mesh_size_y);
+        indexBuffers.resize(ocean_patch_size);
         // Add Tri Strip primitve sets
-        inds.resize((mesh_size_x + 1) * 2);
+        inds.resize((ocean_patch_size + 1) * 2);
 
         VkDeviceSize bufferSize = sizeof(inds[0]) * inds.size();
 
@@ -1632,11 +2008,11 @@ private:
                      stagingBuffer, stagingBufferMemory);
 
         // Each tri strip draws one row of NX quads
-        for (int iBaseTo, iBaseFrom = 0, iY = 0; iY < mesh_size_y;
+        for (int iBaseTo, iBaseFrom = 0, iY = 0; iY < ocean_patch_size;
              iY++, iBaseFrom = iBaseTo)
         {
-            iBaseTo = iBaseFrom + mesh_size_x + 1;
-            for (int iX = 0; iX <= mesh_size_x; iX++)
+            iBaseTo = iBaseFrom + ocean_patch_size + 1;
+            for (int iX = 0; iX <= ocean_patch_size; iX++)
             {
                 inds[iX * 2 + 0] = iBaseFrom + iX;
                 inds[iX * 2 + 1] = iBaseTo + iX;
@@ -1676,8 +2052,8 @@ private:
         VkMemoryPropertyFlags properties =
             deviceLocalImages ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : 0;
 
-        uint32_t texWidth = static_cast<uint32_t>(tex_size_s);
-        uint32_t texHeight = static_cast<uint32_t>(tex_size_t);
+        uint32_t texWidth = static_cast<uint32_t>(ocean_tex_size);
+        uint32_t texHeight = static_cast<uint32_t>(ocean_tex_size);
 
         VkDeviceSize imageSize = texWidth * texHeight * 4 * sizeof(float);
 
@@ -2063,44 +2439,36 @@ private:
         for (size_t i = 0; i < swapChainImages.size(); i++)
         {
             VkDescriptorImageInfo imageInfo[(size_t)InteropTexType::IOPT_COUNT] = {0};
-            imageInfo[IOPT_DISPLACEMENT].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo[IOPT_DISPLACEMENT].imageView = textureImages[IOPT_DISPLACEMENT].imageViews[i];
-            imageInfo[IOPT_DISPLACEMENT].sampler = textureSampler[IOPT_DISPLACEMENT];
-
-            imageInfo[IOPT_NORMAL_MAP].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            imageInfo[IOPT_NORMAL_MAP].imageView = textureImages[IOPT_NORMAL_MAP].imageViews[i];
-            imageInfo[IOPT_NORMAL_MAP].sampler = textureSampler[IOPT_NORMAL_MAP];
 
             VkDescriptorBufferInfo bufferInfo{};
             bufferInfo.buffer = uniformBuffers[i];
             bufferInfo.offset = 0;
             bufferInfo.range = sizeof(UniformBufferObject);
 
-            std::array<VkWriteDescriptorSet, 3> descriptorWrites{};
+            std::array<VkWriteDescriptorSet, IOPT_COUNT + 1> descriptorWrites{};
 
-            descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[0].dstSet = descriptorSets[i];
-            descriptorWrites[0].dstBinding = 0u;
-            descriptorWrites[0].dstArrayElement = 0;
-            descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[0].descriptorCount = 1;
-            descriptorWrites[0].pImageInfo = &imageInfo[IOPT_DISPLACEMENT];
+            for (cl_int target = 0; target < IOPT_COUNT; target++)
+            {
+                imageInfo[target].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                imageInfo[target].imageView = textureImages[target].imageViews[i];
+                imageInfo[target].sampler = textureSampler[target];
 
-            descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[1].dstSet = descriptorSets[i];
-            descriptorWrites[1].dstBinding = 1u;
-            descriptorWrites[1].dstArrayElement = 0;
-            descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            descriptorWrites[1].descriptorCount = 1;
-            descriptorWrites[1].pImageInfo = &imageInfo[IOPT_NORMAL_MAP];
+                descriptorWrites[target].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                descriptorWrites[target].dstSet = descriptorSets[i];
+                descriptorWrites[target].dstBinding = target;
+                descriptorWrites[target].dstArrayElement = 0;
+                descriptorWrites[target].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                descriptorWrites[target].descriptorCount = 1;
+                descriptorWrites[target].pImageInfo = &imageInfo[target];
+            }
 
-            descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            descriptorWrites[2].dstSet = descriptorSets[i];
-            descriptorWrites[2].dstBinding = 2u;
-            descriptorWrites[2].dstArrayElement = 0;
-            descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            descriptorWrites[2].descriptorCount = 1;
-            descriptorWrites[2].pBufferInfo = &bufferInfo;
+            descriptorWrites[IOPT_COUNT].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[IOPT_COUNT].dstSet = descriptorSets[i];
+            descriptorWrites[IOPT_COUNT].dstBinding = IOPT_COUNT;
+            descriptorWrites[IOPT_COUNT].dstArrayElement = 0;
+            descriptorWrites[IOPT_COUNT].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptorWrites[IOPT_COUNT].descriptorCount = 1;
+            descriptorWrites[IOPT_COUNT].pBufferInfo = &bufferInfo;
 
             vkUpdateDescriptorSets(
                 device, static_cast<uint32_t>(descriptorWrites.size()),
@@ -2364,14 +2732,14 @@ private:
     void updateUniforms(uint32_t currentImage)
     {
         UniformBufferObject ubo = {};
-        ubo.ocean_size = mesh_size_x;
+        ubo.ocean_size = ocean_patch_size;
 
         // update camera related uniform
         glm::mat4 view_matrix = glm::lookAt(camera.eye, camera.eye + camera.dir, camera.up);
 
         float fov = glm::radians(60.0);
         float aspect = (float)window_width / window_height;
-        glm::mat4 proj_matrix = glm::perspective(fov, aspect, 1.f, 2.f * mesh_size_x);
+        glm::mat4 proj_matrix = glm::perspective(fov, aspect, 1.f, 2.f * ocean_patch_size);
         proj_matrix[1][1] *= -1;
 
         ubo.view_proj_mat = proj_matrix * view_matrix;
@@ -2390,42 +2758,164 @@ private:
                                 VK_ACCESS_SHADER_READ_BIT);
     }
 
+    void updateSpectrum(uint32_t currentImage)
+    {
+        cl_int2 patch = cl_int2{(int)ocean_patch_size, (int)ocean_tex_size};
+        auto end = std::chrono::system_clock::now();
+        std::chrono::duration<float> delta = end - start;
+
+        // multiply dt to impact pace of ocean animation
+        float dt = delta.count();
+        start = end;
+
+        cl::NDRange lws; // NullRange by default.
+        if (group_size > 0)
+        {
+            lws = cl::NDRange{ group_size, group_size };
+        }
+
+        // change of some ocean's parameters requires to rebuild initial spectrum image
+        if (changed)
+        {
+            float wind_angle_rad = glm::radians(wind_angle);
+            cl_float2 wind = cl_float2{wind_magnitude * glm::cos(wind_angle_rad), wind_magnitude * glm::sin(wind_angle_rad)};
+            init_spectrum_kernel.setArg(0, patch);
+            init_spectrum_kernel.setArg(1, wind);
+            init_spectrum_kernel.setArg(2, *init_spectrum_mem);
+
+            commandQueue.enqueueNDRangeKernel(init_spectrum_kernel, cl::NullRange,
+                                              cl::NDRange{ ocean_tex_size, ocean_tex_size }, lws);
+            changed = false;
+        }
+
+        // ping-pong phase spectrum kernel launch
+        try
+        {
+            phase_kernel.setArg(0, dt);
+            phase_kernel.setArg(1, patch);
+
+            if (is_ping_phase)
+            {
+                phase_kernel.setArg(2, *phase_pingpong_mem[0]);
+                phase_kernel.setArg(3, *phase_pingpong_mem[1]);
+            }
+            else
+            {
+                phase_kernel.setArg(2, *phase_pingpong_mem[1]);
+                phase_kernel.setArg(3, *phase_pingpong_mem[0]);
+            }
+
+            commandQueue.enqueueNDRangeKernel(
+                phase_kernel, cl::NullRange,
+                cl::NDRange{ ocean_tex_size, ocean_tex_size }, lws);
+        }
+        catch (const cl::Error& e)
+        {
+            printf("updateSpectrum: OpenCL %s kernel error: %s\n", e.what(), IGetErrorString(e.err()));
+            exit(1);
+        }
+
+        // spectrum computation
+        {
+            spectrum_kernel.setArg(0, choppiness);
+            spectrum_kernel.setArg(1, patch);
+
+            if (is_ping_phase)
+                spectrum_kernel.setArg(2, *phase_pingpong_mem[1]);
+            else
+                spectrum_kernel.setArg(2, *phase_pingpong_mem[0]);
+
+            spectrum_kernel.setArg(3, *init_spectrum_mem);
+            spectrum_kernel.setArg(4, *mems[IOPT_DISPLACEMENT][currentImage]);
+
+            commandQueue.enqueueNDRangeKernel(
+                spectrum_kernel, cl::NullRange,
+                cl::NDRange{ ocean_tex_size, ocean_tex_size }, lws);
+        }
+
+        // perform 1D IFFT horizontal and vertical iterations
+        {
+            const cl::Image * displ_swap[] = {mems[IOPT_DISPLACEMENT][currentImage].get(), displacement_swap_mem.get()};
+
+            cl::Event event;
+            cl_int2 mode = (cl_int2){0, 0};
+            ifft_kernel.setArg(1, patch);
+
+            bool ifft_pingpong=false;
+            for (int p = 1; p < ocean_tex_size; p <<= 1)
+            {
+                if (ifft_pingpong)
+                {
+                    spectrum_kernel.setArg(2, *displ_swap[1]);
+                    spectrum_kernel.setArg(3, *displ_swap[0]);
+                }
+                else
+                {
+                    spectrum_kernel.setArg(2, *displ_swap[0]);
+                    spectrum_kernel.setArg(3, *displ_swap[1]);
+                }
+
+                mode.s[1] = p;
+                ifft_kernel.setArg(0, mode);
+
+                commandQueue.enqueueNDRangeKernel(
+                    spectrum_kernel, cl::NullRange,
+                    cl::NDRange{ ocean_tex_size }, cl::NDRange{ ocean_tex_size / 2 }, nullptr, &event);
+
+                event.wait();
+                ifft_pingpong = !ifft_pingpong;
+            }
+
+            // Cols
+            mode.s[0] = 1;
+            for (int p = 1; p < ocean_tex_size; p <<= 1)
+            {
+                if (ifft_pingpong)
+                {
+                    spectrum_kernel.setArg(2, *displ_swap[1]);
+                    spectrum_kernel.setArg(3, *displ_swap[0]);
+                }
+                else
+                {
+                    spectrum_kernel.setArg(2, *displ_swap[0]);
+                    spectrum_kernel.setArg(3, *displ_swap[1]);
+                }
+
+                mode.s[1] = p;
+                ifft_kernel.setArg(0, mode);
+
+                commandQueue.enqueueNDRangeKernel(
+                    spectrum_kernel, cl::NullRange,
+                    cl::NDRange{ ocean_tex_size }, cl::NDRange{ ocean_tex_size / 2 }, nullptr, &event);
+                event.wait();
+
+                ifft_pingpong = !ifft_pingpong;
+            }
+        }
+
+        // normals computation
+        {
+            normals_kernel.setArg(0, patch);
+            normals_kernel.setArg(1, *mems[IOPT_DISPLACEMENT][currentImage]);
+            normals_kernel.setArg(2, *mems[IOPT_NORMAL_MAP][currentImage]);
+
+            commandQueue.enqueueNDRangeKernel(
+                normals_kernel, cl::NullRange,
+                cl::NDRange{ ocean_tex_size, ocean_tex_size }, lws);
+        }
+
+        is_ping_phase = !is_ping_phase;
+    }
+
     void updateOcean(uint32_t currentImage)
     {
         updateUniforms(currentImage);
 
-        int kernel_arg_ind=0;
-
-// TODO - temporary hack to work with normal map
-//        for (size_t target=0; target<IOPT_COUNT; target++)
-size_t target_beg = IOPT_NORMAL_MAP;
-for (size_t target=target_beg; target<IOPT_COUNT; target++)
-        {
-            if (useExternalMemory)
-            {
-                commandQueue.enqueueAcquireExternalMemObjects(
-                    { (*mems[target][currentImage]) });
-            }
-
-            kernel.setArg(kernel_arg_ind, *mems[target][currentImage]);
-            kernel_arg_ind++;
-        }
-        kernel.setArg(kernel_arg_ind, cr); kernel_arg_ind++;
-        kernel.setArg(kernel_arg_ind, ci);
-
-        cl::NDRange lws; // NullRange by default.
-        if (group_size_x > 0 && group_size_y > 0)
-        {
-            lws = cl::NDRange{ group_size_x, group_size_y };
-        }
-
-        commandQueue.enqueueNDRangeKernel(kernel, cl::NullRange,
-                                          cl::NDRange{ tex_size_s, tex_size_t }, lws);
+        updateSpectrum(currentImage);
 
         if (useExternalMemory)
         {
-//            for (size_t target=0; target<IOPT_COUNT; target++)
-for (size_t target=target_beg; target<IOPT_COUNT; target++)
+            for (size_t target=0; target<IOPT_COUNT; target++)
             {
                 commandQueue.enqueueReleaseExternalMemObjects(
                     { *mems[target][currentImage] });
@@ -2443,15 +2933,14 @@ for (size_t target=target_beg; target<IOPT_COUNT; target++)
         }
         else
         {
-//            for (size_t target=0; target<IOPT_COUNT; target++)
-for (size_t target=target_beg; target<IOPT_COUNT; target++)
+            for (size_t target=0; target<IOPT_COUNT; target++)
             {
                 size_t rowPitch = 0;
                 void* pixels = commandQueue.enqueueMapImage(
                     *mems[target][currentImage], CL_TRUE, CL_MAP_READ, { 0, 0, 0 },
-                    { tex_size_s, tex_size_t, 1 }, &rowPitch, nullptr);
+                    { ocean_tex_size, ocean_tex_size, 1 }, &rowPitch, nullptr);
 
-                VkDeviceSize imageSize = tex_size_s * tex_size_t * 4 * sizeof(float);
+                VkDeviceSize imageSize = ocean_tex_size * ocean_tex_size * 4 * sizeof(float);
 
                 void* data;
                 vkMapMemory(device, stagingBufferMemory, 0, imageSize, 0, &data);
@@ -2466,8 +2955,8 @@ for (size_t target=target_beg; target<IOPT_COUNT; target++)
                                       VK_IMAGE_LAYOUT_UNDEFINED,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
                 copyBufferToImage(stagingBuffer, textureImages[target].images[currentImage],
-                                  static_cast<uint32_t>(tex_size_s),
-                                  static_cast<uint32_t>(tex_size_t));
+                                  static_cast<uint32_t>(ocean_tex_size),
+                                  static_cast<uint32_t>(ocean_tex_size));
                 transitionImageLayout(textureImages[target].images[currentImage],
                                       VK_FORMAT_R32G32B32A32_SFLOAT,
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2478,30 +2967,6 @@ for (size_t target=target_beg; target<IOPT_COUNT; target++)
 
     void drawFrame()
     {
-        if (animate)
-        {
-            float fcr = (frame % 599) / 599.f * 2.0f * CL_M_PI_F;
-            float fci = (frame % 773) / 773.f * 2.0f * CL_M_PI_F;
-            cr = sinf(fcr);
-            ci = sinf(fci);
-
-            ++frame;
-
-            auto end = std::chrono::system_clock::now();
-            std::chrono::duration<float> delta = end - start;
-            float elapsed_seconds = delta.count();
-            if (elapsed_seconds > 2.0f)
-            {
-                printf("FPS: %.1f\n", (frame - startFrame) / elapsed_seconds);
-                startFrame = frame;
-                start = end;
-            }
-        }
-        if (redraw)
-        {
-            redraw = false;
-        }
-
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE,
                         UINT64_MAX);
 
